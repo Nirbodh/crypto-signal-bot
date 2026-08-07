@@ -1,0 +1,8 @@
+requests
+pymongo
+python-dotenv
+pandas
+numpy
+ta
+ccxt
+google-genai
