@@ -1,139 +1,341 @@
 import logging
+import os
 import time
 
-from app.config import Config
-from app.data.market_data import MarketDataEngine
-from app.universe.coin_universe import CoinUniverseEngine
-from app.universe.liquidity_ranker import LiquidityRanker
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+from app.scanner.coin_universe import (
+    CoinUniverseEngine,
 )
 
-logger = logging.getLogger("crypto-signal-bot")
+from app.market_data.ohlcv_fetcher import (
+    OHLCVFetcher,
+)
+
+from app.core.scanner_engine import (
+    ScannerEngine,
+)
+
+from app.risk.risk_engine import (
+    RiskEngine,
+)
+
+from app.telegram.telegram_bot import (
+    TelegramBot,
+)
 
 
-def run():
+# Future modules
 
-    logger.info("🚀 Crypto Signal Bot started")
+from app.fusion.signal_fusion import (
+    SignalFusionEngine,
+)
 
-    # ==================================================
-    # MARKET DATA
-    # ==================================================
+from app.ai.gemini_reviewer import (
+    GeminiReviewer,
+)
+
+from app.execution.trade_plan import (
+    TradePlanEngine,
+)
+
+
+# Advanced liquidity layer
+
+from app.data.market_data import (
+    MarketDataEngine,
+)
+
+from app.universe.liquidity_ranker import (
+    LiquidityRanker,
+)
+
+
+
+# ==========================================================
+# Logging
+# ==========================================================
+
+logging.basicConfig(
+
+    level=logging.INFO,
+
+    format=(
+        "%(asctime)s | "
+        "%(levelname)s | "
+        "%(message)s"
+    )
+
+)
+
+
+logger = logging.getLogger(
+    "crypto-signal-bot"
+)
+
+
+
+# ==========================================================
+# Create Bot
+# ==========================================================
+
+def create_bot():
+
+    logger.info(
+        "🚀 Initializing Crypto Signal Bot..."
+    )
+
+
+    # -----------------------------
+    # Market Data
+    # -----------------------------
 
     market_data = MarketDataEngine()
 
-    logger.info(
-        "📡 Loading exchange markets..."
+
+    try:
+
+        status = (
+            market_data.load_markets()
+        )
+
+        logger.info(
+            "Exchange status: %s",
+            status,
+        )
+
+
+    except Exception as exc:
+
+        logger.warning(
+            "Market loading failed: %s",
+            exc,
+        )
+
+
+
+    # -----------------------------
+    # Universe
+    # -----------------------------
+
+    coin_universe = CoinUniverseEngine(
+
+        max_coins=100
+
     )
 
-    market_status = (
-        market_data.load_markets()
-    )
 
-    logger.info(
-        "Exchange status: %s",
-        market_status,
-    )
+    # -----------------------------
+    # Liquidity Ranking
+    # -----------------------------
 
-    # ==================================================
-    # COIN UNIVERSE
-    # ==================================================
-
-    universe_engine = CoinUniverseEngine(
+    liquidity = LiquidityRanker(
         market_data
     )
 
-    symbols = (
-        universe_engine
-        .build_cross_exchange_universe()
+
+    try:
+
+        ranked = (
+            liquidity.build_ranked_universe(
+
+                minimum_volume=1_000_000,
+
+                maximum_coins=250
+
+            )
+        )
+
+
+        if not ranked.empty:
+
+            logger.info(
+                "Top liquid coins loaded: %s",
+                len(ranked),
+            )
+
+
+    except Exception as exc:
+
+        logger.warning(
+            "Liquidity ranking failed: %s",
+            exc,
+        )
+
+
+
+    # -----------------------------
+    # Analysis Engines
+    # -----------------------------
+
+    ohlcv = OHLCVFetcher()
+
+
+    fusion = SignalFusionEngine()
+
+
+    gemini = GeminiReviewer()
+
+
+    trade_plan = TradePlanEngine()
+
+
+    risk = RiskEngine()
+
+
+    telegram = TelegramBot()
+
+
+
+    # -----------------------------
+    # Main Engine
+    # -----------------------------
+
+    scanner = ScannerEngine(
+
+        coin_universe=coin_universe,
+
+        ohlcv_fetcher=ohlcv,
+
+        fusion_engine=fusion,
+
+        gemini_reviewer=gemini,
+
+        trade_plan_engine=trade_plan,
+
+        risk_engine=risk,
+
+        telegram_bot=telegram,
+
     )
+
+
+    return scanner, telegram, market_data
+
+
+
+
+# ==========================================================
+# Worker
+# ==========================================================
+
+def main():
+
+
+    scanner, telegram, market_data = (
+        create_bot()
+    )
+
+
+    interval = int(
+
+        os.getenv(
+
+            "SCAN_INTERVAL",
+
+            3600
+
+        )
+
+    )
+
+
 
     logger.info(
-        "🪙 Clean USDT universe: %s",
-        len(symbols),
+        "✅ Bot is running 24/7"
     )
 
-    # ==================================================
-    # LIQUIDITY RANKING
-    # ==================================================
 
-    liquidity_ranker = LiquidityRanker(
-        market_data
+    telegram.send_status(
+        "🟢 Crypto Signal Bot Started"
     )
 
-    ranked = (
-        liquidity_ranker
-        .build_ranked_universe(
-            minimum_volume=1_000_000,
-            maximum_coins=250,
-        )
-    )
 
-    if ranked.empty:
 
-        logger.error(
-            "❌ No liquid coins available."
-        )
-
-    else:
-
-        logger.info(
-            "🏆 Top liquid coins:"
-        )
-
-        logger.info(
-            "\n%s",
-            ranked[
-                [
-                    "base",
-                    "total_volume_24h",
-                    "exchange_count",
-                    "liquidity_score",
-                ]
-            ]
-            .head(20)
-            .to_string(index=False),
-        )
-
-    # ==================================================
-    # TEST OHLCV
-    # ==================================================
-
-    df = market_data.fetch_ohlcv(
-        symbol="BTC/USDT",
-        timeframe="15m",
-        limit=100,
-        preferred_exchange="binance",
-    )
-
-    if df is not None and not df.empty:
-
-        logger.info(
-            "✅ BTC/USDT OHLCV: %s candles",
-            len(df),
-        )
-
-    else:
-
-        logger.error(
-            "❌ BTC/USDT OHLCV failed."
-        )
-
-    logger.info(
-        "🧪 Step 5 liquidity test completed."
-    )
-
-    # Temporary runtime loop
     while True:
 
-        time.sleep(
-            Config.SCAN_INTERVAL_MINUTES
-            * 60
+
+        try:
+
+
+            logger.info(
+                "🔍 Starting market scan..."
+            )
+
+
+            results = (
+                scanner.run_scan(
+                    limit=20
+                )
+            )
+
+
+            candidates = [
+
+                x
+
+                for x in results
+
+                if x.get(
+                    "status"
+                )
+                == "CANDIDATE"
+
+            ]
+
+
+
+            logger.info(
+                "🎯 Found candidates: %s",
+                len(candidates),
+            )
+
+
+
+            for signal in candidates:
+
+
+                logger.info(
+                    "⭐ %s",
+                    signal.get(
+                        "symbol"
+                    ),
+                )
+
+
+                # Telegram final connection
+                # will be activated after
+                # signal schema locking.
+
+
+
+            logger.info(
+                "✅ Scan finished"
+            )
+
+
+
+        except Exception as exc:
+
+
+            logger.exception(
+                "Scanner error: %s",
+                exc,
+            )
+
+
+
+        logger.info(
+            "Sleeping %s seconds",
+            interval,
         )
+
+
+        time.sleep(
+            interval
+        )
+
 
 
 if __name__ == "__main__":
-    run()
+
+    main()
