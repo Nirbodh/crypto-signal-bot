@@ -1,3 +1,4 @@
+import html
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -10,12 +11,20 @@ logger = logging.getLogger("crypto-signal-bot")
 
 class TelegramBot:
     """
-    Telegram notification service.
+    Production Telegram notification service.
 
     Responsibilities:
-        - Send formatted signal
+        - Format signals
+        - Send trading signals
         - Send system/status messages
         - Never calculate signals
+
+    Compatible with:
+        SignalFusionEngine
+        ScannerEngine
+        GeminiReviewer
+        TradePlanEngine
+        RiskEngine
     """
 
     def __init__(
@@ -27,35 +36,94 @@ class TelegramBot:
 
         self.bot_token = (
             bot_token
-            or os.getenv(
-                "TELEGRAM_BOT_TOKEN"
-            )
+            or os.getenv("TELEGRAM_BOT_TOKEN")
         )
 
         self.chat_id = (
             chat_id
-            or os.getenv(
-                "TELEGRAM_CHAT_ID"
-            )
+            or os.getenv("TELEGRAM_CHAT_ID")
         )
 
-        self.timeout = timeout
+        self.timeout = max(
+            3,
+            int(timeout),
+        )
 
         self.base_url = (
             "https://api.telegram.org"
         )
 
     # ==========================================================
-    # Basic validation
+    # Configuration
     # ==========================================================
 
     @property
     def configured(self) -> bool:
-
         return bool(
             self.bot_token
             and self.chat_id
         )
+
+    # ==========================================================
+    # Safe formatting helpers
+    # ==========================================================
+
+    @staticmethod
+    def _safe_text(
+        value: Any,
+        default: str = "-",
+    ) -> str:
+        """
+        Safely convert arbitrary values to Telegram HTML-safe text.
+        """
+
+        if value is None:
+            return default
+
+        text = str(value).strip()
+
+        if not text:
+            return default
+
+        return html.escape(text)
+
+    @staticmethod
+    def _safe_number(
+        value: Any,
+        default: str = "-",
+    ) -> str:
+        """
+        Format numeric values without crashing.
+        """
+
+        if value is None:
+            return default
+
+        try:
+            number = float(value)
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return TelegramBot._safe_text(
+                value,
+                default,
+            )
+
+        if number.is_integer():
+            return str(int(number))
+
+        return f"{number:.4f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _get_dict(
+        value: Any,
+    ) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+
+        return {}
 
     # ==========================================================
     # Send message
@@ -69,11 +137,22 @@ class TelegramBot:
 
         if not self.configured:
 
+            logger.warning(
+                "⚠️ Telegram credentials are not configured"
+            )
+
             return {
                 "status": "SKIPPED",
                 "reason": (
                     "Telegram credentials not configured"
                 ),
+            }
+
+        if not text:
+
+            return {
+                "status": "SKIPPED",
+                "reason": "Empty Telegram message",
             }
 
         url = (
@@ -113,12 +192,19 @@ class TelegramBot:
                     ),
                 }
 
+            reason = data.get(
+                "description",
+                "Telegram API error",
+            )
+
+            logger.warning(
+                "Telegram API rejected message: %s",
+                reason,
+            )
+
             return {
                 "status": "FAILED",
-                "reason": data.get(
-                    "description",
-                    "Telegram API error",
-                ),
+                "reason": reason,
             }
 
         except requests.RequestException as exc:
@@ -133,6 +219,20 @@ class TelegramBot:
                 "reason": str(exc),
             }
 
+        except ValueError as exc:
+
+            logger.warning(
+                "Telegram returned invalid JSON: %s",
+                exc,
+            )
+
+            return {
+                "status": "FAILED",
+                "reason": (
+                    "Invalid Telegram API response"
+                ),
+            }
+
     # ==========================================================
     # Signal formatter
     # ==========================================================
@@ -141,63 +241,144 @@ class TelegramBot:
         self,
         signal: Dict[str, Any],
     ) -> str:
+        """
+        Format the complete ScannerEngine result.
 
-        symbol = signal.get(
-            "symbol",
+        Important:
+        Fusion data normally lives under:
+
+            signal["fusion"]
+
+        not directly under signal.
+        """
+
+        signal = self._get_dict(signal)
+
+        # ------------------------------------------------------
+        # Basic signal information
+        # ------------------------------------------------------
+
+        symbol = self._safe_text(
+            signal.get(
+                "symbol",
+                "UNKNOWN",
+            ),
             "UNKNOWN",
         )
 
         direction = str(
             signal.get(
                 "direction",
-                "WATCH",
+                "NEUTRAL",
             )
         ).upper()
 
-        score = signal.get(
-            "score",
-            0,
-        )
+        # Support both fusion terminology and
+        # execution terminology.
 
-        grade = signal.get(
-            "grade",
-            "-",
-        )
-
-        confluence = signal.get(
-            "confluence",
-            0,
-        )
-
-        # ------------------------------------------------------
-        # Direction emoji
-        # ------------------------------------------------------
-
-        if direction == "LONG":
+        if direction == "BULLISH":
 
             direction_text = (
-                "🟢 LONG"
+                "🟢 <b>LONG / BULLISH</b>"
+            )
+
+        elif direction == "BEARISH":
+
+            direction_text = (
+                "🔴 <b>SHORT / BEARISH</b>"
+            )
+
+        elif direction == "LONG":
+
+            direction_text = (
+                "🟢 <b>LONG</b>"
             )
 
         elif direction == "SHORT":
 
             direction_text = (
-                "🔴 SHORT"
+                "🔴 <b>SHORT</b>"
             )
 
         else:
 
             direction_text = (
-                "🟡 WATCH"
+                "🟡 <b>NEUTRAL / WATCH</b>"
             )
+
+        # ------------------------------------------------------
+        # Fusion
+        # ------------------------------------------------------
+
+        fusion = self._get_dict(
+            signal.get("fusion")
+        )
+
+        # Prefer top-level values if present,
+        # otherwise use fusion values.
+
+        score = signal.get(
+            "score",
+            fusion.get("score", 0),
+        )
+
+        grade = signal.get(
+            "grade",
+            fusion.get("grade", "-"),
+        )
+
+        confluence = signal.get(
+            "confluence",
+            fusion.get("confluence", 0),
+        )
+
+        state = signal.get(
+            "state",
+            fusion.get("state", "-"),
+        )
+
+        # ------------------------------------------------------
+        # Components
+        # ------------------------------------------------------
+
+        components = self._get_dict(
+            signal.get(
+                "components",
+                fusion.get(
+                    "components",
+                    {},
+                ),
+            )
+        )
+
+        technical = components.get(
+            "technical"
+        )
+
+        smc = components.get(
+            "smc"
+        )
+
+        mtf = components.get(
+            "mtf"
+        )
+
+        derivatives = components.get(
+            "derivatives"
+        )
+
+        market = components.get(
+            "market"
+        )
 
         # ------------------------------------------------------
         # Trade plan
         # ------------------------------------------------------
 
-        trade_plan = signal.get(
-            "trade_plan",
-            {},
+        trade_plan = self._get_dict(
+            signal.get(
+                "trade_plan"
+            )
         )
 
         entry = trade_plan.get(
@@ -220,98 +401,94 @@ class TelegramBot:
             "tp3"
         )
 
-        # ------------------------------------------------------
-        # Components
-        # ------------------------------------------------------
+        # Support alternative naming.
 
-        components = signal.get(
-            "components",
-            {},
-        )
-
-        technical = components.get(
-            "technical",
-            0,
-        )
-
-        smc = components.get(
-            "smc",
-            0,
-        )
-
-        mtf = components.get(
-            "mtf",
-            0,
-        )
-
-        derivatives = components.get(
-            "derivatives",
-            0,
-        )
-
-        market = components.get(
-            "market",
-            0,
-        )
+        if stop_loss is None:
+            stop_loss = trade_plan.get(
+                "sl"
+            )
 
         # ------------------------------------------------------
         # Risk
         # ------------------------------------------------------
 
-        risk = signal.get(
-            "risk",
-            {},
+        risk = self._get_dict(
+            signal.get(
+                "risk"
+            )
         )
 
-        position = risk.get(
-            "position",
-            {},
+        position = self._get_dict(
+            risk.get(
+                "position"
+            )
         )
 
-        leverage = risk.get(
-            "leverage",
-            {},
+        leverage = self._get_dict(
+            risk.get(
+                "leverage"
+            )
         )
 
         risk_percent = position.get(
             "risk_percent"
         )
 
-        position_notional = (
-            position.get(
-                "position_notional"
-            )
+        position_notional = position.get(
+            "position_notional"
         )
 
-        leverage_value = (
-            leverage.get(
+        leverage_value = leverage.get(
+            "leverage"
+        )
+
+        # Support alternative risk structures.
+
+        if risk_percent is None:
+            risk_percent = risk.get(
+                "risk_percent"
+            )
+
+        if position_notional is None:
+            position_notional = risk.get(
+                "position_notional"
+            )
+
+        if leverage_value is None:
+            leverage_value = risk.get(
                 "leverage"
             )
-        )
 
         # ------------------------------------------------------
         # Gemini
         # ------------------------------------------------------
 
-        gemini = signal.get(
-            "gemini",
-            {},
-        )
-
-        gemini_verdict = gemini.get(
-            "verdict",
-            "N/A",
-        )
-
-        gemini_confidence = (
-            gemini.get(
-                "confidence",
-                0,
+        gemini = self._get_dict(
+            signal.get(
+                "gemini"
             )
         )
 
-        gemini_reason = gemini.get(
-            "reason",
+        gemini_verdict = str(
+            gemini.get(
+                "verdict",
+                gemini.get(
+                    "decision",
+                    "N/A",
+                ),
+            )
+        ).upper()
+
+        gemini_confidence = gemini.get(
+            "confidence",
+            0,
+        )
+
+        gemini_reason = self._safe_text(
+            gemini.get(
+                "reason",
+                "",
+            ),
             "",
         )
 
@@ -321,21 +498,48 @@ class TelegramBot:
 
         warnings = []
 
-        warnings.extend(
-            signal.get(
-                "warnings",
-                [],
-            )
+        fusion_warnings = fusion.get(
+            "warnings",
+            [],
         )
 
-        warnings.extend(
-            gemini.get(
-                "risk_flags",
-                [],
-            )
+        signal_warnings = signal.get(
+            "warnings",
+            [],
         )
 
-        # Remove duplicates.
+        gemini_risk_flags = gemini.get(
+            "risk_flags",
+            [],
+        )
+
+        for warning_list in (
+            fusion_warnings,
+            signal_warnings,
+            gemini_risk_flags,
+        ):
+
+            if not isinstance(
+                warning_list,
+                list,
+            ):
+                continue
+
+            for warning in warning_list:
+
+                if warning is None:
+                    continue
+
+                warning_text = str(
+                    warning
+                ).strip()
+
+                if warning_text:
+                    warnings.append(
+                        warning_text
+                    )
+
+        # Remove duplicates while preserving order.
 
         warnings = list(
             dict.fromkeys(
@@ -354,61 +558,92 @@ class TelegramBot:
             f"🪙 <b>{symbol}</b>",
             direction_text,
             "",
-            f"⭐ Score: <b>{score}/100</b>",
-            f"🏆 Grade: <b>{grade}</b>",
+            (
+                f"⭐ Score: "
+                f"<b>{self._safe_number(score)}/100</b>"
+            ),
+            (
+                f"🏆 Grade: "
+                f"<b>{self._safe_text(grade)}</b>"
+            ),
             (
                 f"🔥 Confluence: "
-                f"<b>{confluence}%</b>"
+                f"<b>{self._safe_number(confluence)}%</b>"
+            ),
+            (
+                f"📌 State: "
+                f"<b>{self._safe_text(state)}</b>"
             ),
             "",
         ]
 
-        # Only show execution levels
-        # when available.
+        # ------------------------------------------------------
+        # Execution levels
+        # ------------------------------------------------------
 
         if entry is not None:
 
             lines.extend(
                 [
-                    f"📍 Entry: <b>{entry}</b>",
+                    "📐 <b>Trade Plan</b>",
+                    (
+                        f"📍 Entry: "
+                        f"<b>{self._safe_number(entry)}</b>"
+                    ),
                     (
                         f"🛑 SL: "
-                        f"<b>{stop_loss}</b>"
+                        f"<b>{self._safe_number(stop_loss)}</b>"
                     ),
-                    "",
                     (
                         f"🎯 TP1: "
-                        f"<b>{tp1}</b>"
+                        f"<b>{self._safe_number(tp1)}</b>"
                     ),
                     (
                         f"🎯 TP2: "
-                        f"<b>{tp2}</b>"
+                        f"<b>{self._safe_number(tp2)}</b>"
                     ),
                     (
                         f"🎯 TP3: "
-                        f"<b>{tp3}</b>"
+                        f"<b>{self._safe_number(tp3)}</b>"
                     ),
                     "",
                 ]
             )
+
+        # ------------------------------------------------------
+        # Analysis
+        # ------------------------------------------------------
 
         lines.extend(
             [
                 "📊 <b>Analysis</b>",
                 (
                     f"Technical: "
-                    f"{technical}"
+                    f"{self._safe_number(technical)}"
                 ),
-                f"🧠 SMC: {smc}",
-                f"⏱ MTF: {mtf}",
+                (
+                    f"🧠 SMC: "
+                    f"{self._safe_number(smc)}"
+                ),
+                (
+                    f"⏱ MTF: "
+                    f"{self._safe_number(mtf)}"
+                ),
                 (
                     f"📈 Derivatives: "
-                    f"{derivatives}"
+                    f"{self._safe_number(derivatives)}"
                 ),
-                f"🌐 Market: {market}",
+                (
+                    f"🌐 Market: "
+                    f"{self._safe_number(market)}"
+                ),
                 "",
             ]
         )
+
+        # ------------------------------------------------------
+        # Risk
+        # ------------------------------------------------------
 
         if risk:
 
@@ -417,30 +652,34 @@ class TelegramBot:
                     "💰 <b>Risk</b>",
                     (
                         f"Risk: "
-                        f"{risk_percent}%"
+                        f"{self._safe_number(risk_percent)}%"
                     ),
                     (
                         f"Position: "
-                        f"${position_notional}"
+                        f"${self._safe_number(position_notional)}"
                     ),
                     (
                         f"Leverage: "
-                        f"{leverage_value}x"
+                        f"{self._safe_number(leverage_value)}x"
                     ),
                     "",
                 ]
             )
+
+        # ------------------------------------------------------
+        # Gemini
+        # ------------------------------------------------------
 
         lines.extend(
             [
                 "🤖 <b>Gemini Review</b>",
                 (
                     f"Verdict: "
-                    f"<b>{gemini_verdict}</b>"
+                    f"<b>{self._safe_text(gemini_verdict)}</b>"
                 ),
                 (
                     f"Confidence: "
-                    f"{gemini_confidence}%"
+                    f"{self._safe_number(gemini_confidence)}%"
                 ),
             ]
         )
@@ -450,6 +689,10 @@ class TelegramBot:
             lines.append(
                 f"Reason: {gemini_reason}"
             )
+
+        # ------------------------------------------------------
+        # Risk flags
+        # ------------------------------------------------------
 
         if warnings:
 
@@ -463,8 +706,15 @@ class TelegramBot:
             for warning in warnings:
 
                 lines.append(
-                    f"• {warning}"
+                    "• "
+                    + self._safe_text(
+                        warning
+                    )
                 )
+
+        # ------------------------------------------------------
+        # Footer
+        # ------------------------------------------------------
 
         lines.extend(
             [
@@ -487,11 +737,26 @@ class TelegramBot:
         signal: Dict[str, Any],
     ) -> Dict[str, Any]:
 
-        message = (
-            self.format_signal(
+        try:
+
+            message = self.format_signal(
                 signal
             )
-        )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Telegram signal formatting failed: %s",
+                exc,
+            )
+
+            return {
+                "status": "FAILED",
+                "reason": (
+                    "Signal formatting failed"
+                ),
+                "error": str(exc),
+            }
 
         return self.send_message(
             message
@@ -506,9 +771,14 @@ class TelegramBot:
         message: str,
     ) -> Dict[str, Any]:
 
+        safe_message = self._safe_text(
+            message,
+            "",
+        )
+
         text = (
             "🤖 <b>Crypto Signal Bot</b>\n\n"
-            + message
+            + safe_message
         )
 
         return self.send_message(
