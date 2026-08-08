@@ -41,7 +41,7 @@ class GeminiReviewer:
             or os.getenv(
                 "GEMINI_MODEL"
             )
-            or "gemini-2.5-flash"
+            or "gemini-2.0-flash-exp"
         )
 
         self.client = None
@@ -174,6 +174,7 @@ Quantitative analysis:
 
             return {
                 "verdict": "CAUTION",
+                "decision": "CAUTION",
                 "confidence": 0,
                 "reason": (
                     "Gemini returned "
@@ -217,9 +218,17 @@ Quantitative analysis:
 
             confidence = 0
 
+        # Map verdict to decision for scanner compatibility
+        if verdict == "CONFIRM":
+            decision = "APPROVE"
+        elif verdict == "CAUTION":
+            decision = "CAUTION"
+        else:
+            decision = "REJECT"
+
         return {
             "verdict": verdict,
-
+            "decision": decision,
             "confidence": max(
                 0,
                 min(
@@ -294,6 +303,7 @@ Quantitative analysis:
 
             return {
                 "verdict": "CAUTION",
+                "decision": "CAUTION",
                 "confidence": 0,
                 "reason": (
                     "Gemini API key is not configured"
@@ -345,6 +355,7 @@ Quantitative analysis:
 
             return {
                 "verdict": "CAUTION",
+                "decision": "CAUTION",
                 "confidence": 0,
                 "reason": (
                     "Gemini request failed"
