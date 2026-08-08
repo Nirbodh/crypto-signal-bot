@@ -70,6 +70,30 @@ from app.universe.liquidity_ranker import (
     LiquidityRanker,
 )
 
+from app.analysis.technical_engine import (
+    TechnicalEngine,
+)
+
+from app.analysis.smc_engine import (
+    SMCEngine,
+)
+
+from app.analysis.mtf_engine import (
+    MultiTimeframeEngine,
+)
+
+from app.analysis.derivatives_engine import (
+    DerivativesEngine,
+)
+
+from app.analysis.market_context import (
+    MarketContextEngine,
+)
+
+from app.analysis.setup_validator import (
+    SMCSetupValidator,
+)
+
 
 # ==========================================================
 # Logging
@@ -248,6 +272,17 @@ def create_bot():
     ohlcv_engine = OHLCVFetcher()
 
     # ------------------------------------------------------
+    # Analysis Engines
+    # ------------------------------------------------------
+
+    technical_engine = TechnicalEngine()
+    smc_engine = SMCEngine()
+    mtf_engine = MultiTimeframeEngine()
+    derivatives_engine = DerivativesEngine()
+    market_context_engine = MarketContextEngine()
+    setup_validator = SMCSetupValidator()
+
+    # ------------------------------------------------------
     # Signal Fusion
     # ------------------------------------------------------
 
@@ -286,6 +321,18 @@ def create_bot():
         coin_universe=coin_engine,
 
         ohlcv_fetcher=ohlcv_engine,
+
+        technical_engine=technical_engine,
+
+        smc_engine=smc_engine,
+
+        mtf_engine=mtf_engine,
+
+        derivatives_engine=derivatives_engine,
+
+        market_context_engine=market_context_engine,
+
+        setup_validator=setup_validator,
 
         fusion_engine=fusion_engine,
 
@@ -663,14 +710,6 @@ def manual_scan():
 # ==========================================================
 # Gunicorn / Render Startup
 # ==========================================================
-
-# Render normally runs:
-#
-# gunicorn app.main:app
-#
-# Therefore __name__ == "__main__" is NOT executed.
-#
-# We initialize the bot when this module is imported.
 
 if os.getenv("RENDER"):
 
