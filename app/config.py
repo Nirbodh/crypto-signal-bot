@@ -7,6 +7,10 @@ class Config:
     ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 
     # Scanner
+    SCAN_INTERVAL = int(
+        os.getenv("SCAN_INTERVAL", "3600")
+    )  # seconds
+
     SCAN_INTERVAL_MINUTES = int(
         os.getenv("SCAN_INTERVAL_MINUTES", "15")
     )
@@ -25,10 +29,12 @@ class Config:
 
     # APIs
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
     COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY")
     CMC_API_KEY = os.getenv("CMC_API_KEY")
     COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
     CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY")
+    COINMARKETCAP_API_KEY = os.getenv("COINMARKETCAP_API_KEY")
 
     # Telegram
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
