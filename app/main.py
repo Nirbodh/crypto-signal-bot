@@ -1,9 +1,10 @@
+import logging
 import os
 import sys
 import time
-import logging
 import threading
 from typing import Optional
+
 
 # ==========================================================
 # Python Path
@@ -16,11 +17,14 @@ BASE_DIR = os.path.dirname(
 )
 
 if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+    sys.path.insert(
+        0,
+        BASE_DIR,
+    )
 
 
 # ==========================================================
-# Third-party
+# Flask
 # ==========================================================
 
 from flask import Flask, jsonify
@@ -64,10 +68,6 @@ from app.execution.trade_plan import (
 
 from app.data.market_data import (
     MarketDataEngine,
-)
-
-from app.universe.liquidity_ranker import (
-    LiquidityRanker,
 )
 
 from app.technical.technical_engine import (
@@ -124,21 +124,107 @@ app = Flask(__name__)
 # Global State
 # ==========================================================
 
-scanner: Optional[ScannerEngine] = None
-telegram: Optional[TelegramBot] = None
-market_data: Optional[MarketDataEngine] = None
+scanner: Optional[
+    ScannerEngine
+] = None
+
+telegram: Optional[
+    TelegramBot
+] = None
+
+market_data: Optional[
+    MarketDataEngine
+] = None
 
 last_scan_time = None
 last_scan_status = "NOT_STARTED"
 
 bot_started = False
-
 bot_initializing = False
-
 scan_running = False
 
 startup_lock = threading.Lock()
 scan_lock = threading.Lock()
+
+
+# ==========================================================
+# Configuration
+# ==========================================================
+
+def get_int_env(
+    name: str,
+    default: int,
+    minimum: int = 0,
+) -> int:
+
+    try:
+
+        value = int(
+            os.getenv(
+                name,
+                str(default),
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        value = default
+
+    return max(
+        minimum,
+        value,
+    )
+
+
+SCAN_LIMIT = get_int_env(
+    "SCAN_LIMIT",
+    100,
+    0,
+)
+
+UNIVERSE_MAX_COINS = get_int_env(
+    "UNIVERSE_MAX_COINS",
+    500,
+    1,
+)
+
+MIN_QUOTE_VOLUME = float(
+    os.getenv(
+        "MIN_QUOTE_VOLUME",
+        "250000",
+    )
+)
+
+SCAN_INTERVAL = get_int_env(
+    "SCAN_INTERVAL",
+    3600,
+    60,
+)
+
+MIN_SIGNAL_SCORE = float(
+    os.getenv(
+        "MIN_SIGNAL_SCORE",
+        "70",
+    )
+)
+
+
+logger.info(
+    "⚙️ Configuration | "
+    "SCAN_LIMIT=%s | "
+    "UNIVERSE_MAX_COINS=%s | "
+    "MIN_QUOTE_VOLUME=$%.0f | "
+    "SCAN_INTERVAL=%ss | "
+    "MIN_SIGNAL_SCORE=%.1f",
+    SCAN_LIMIT,
+    UNIVERSE_MAX_COINS,
+    MIN_QUOTE_VOLUME,
+    SCAN_INTERVAL,
+    MIN_SIGNAL_SCORE,
+)
 
 
 # ==========================================================
@@ -160,6 +246,16 @@ def health():
             "scan_running": scan_running,
             "last_scan": last_scan_time,
             "last_scan_status": last_scan_status,
+            "scan_limit": SCAN_LIMIT,
+            "universe_max_coins": (
+                UNIVERSE_MAX_COINS
+            ),
+            "min_quote_volume": (
+                MIN_QUOTE_VOLUME
+            ),
+            "min_signal_score": (
+                MIN_SIGNAL_SCORE
+            ),
         }
     ), 200
 
@@ -180,6 +276,7 @@ def root():
             "status": "running",
             "bot_started": bot_started,
             "last_scan_status": last_scan_status,
+            "scan_limit": SCAN_LIMIT,
             "health": "/health",
         }
     ), 200
@@ -221,49 +318,22 @@ def create_bot():
 
     # ------------------------------------------------------
     # Coin Universe
+    #
+    # Broad universe:
+    # high + mid + lower-cap assets
     # ------------------------------------------------------
 
     coin_engine = CoinUniverseEngine(
-        max_coins=100
+        min_quote_volume=MIN_QUOTE_VOLUME,
+        max_coins=UNIVERSE_MAX_COINS,
     )
 
-    # ------------------------------------------------------
-    # Liquidity Ranking
-    # ------------------------------------------------------
-
-    liquidity_ranker = LiquidityRanker(
-        market_data_engine
+    logger.info(
+        "🌎 Coin universe configured | "
+        "min_volume=$%.0f | max_coins=%s",
+        MIN_QUOTE_VOLUME,
+        UNIVERSE_MAX_COINS,
     )
-
-    try:
-
-        ranked = (
-            liquidity_ranker
-            .build_ranked_universe(
-                minimum_volume=1_000_000,
-                maximum_coins=250,
-            )
-        )
-
-        if ranked is not None and not ranked.empty:
-
-            logger.info(
-                "🏆 Liquid universe: %s coins",
-                len(ranked),
-            )
-
-        else:
-
-            logger.warning(
-                "⚠️ Liquidity universe is empty"
-            )
-
-    except Exception as exc:
-
-        logger.warning(
-            "⚠️ Liquidity ranking failed: %s",
-            exc,
-        )
 
     # ------------------------------------------------------
     # OHLCV
@@ -279,11 +349,13 @@ def create_bot():
     smc_engine = SMCEngine()
     mtf_engine = MultiTimeframeEngine()
     derivatives_engine = DerivativesEngine()
-    market_context_engine = MarketContextEngine()
+    market_context_engine = (
+        MarketContextEngine()
+    )
     setup_validator = SMCSetupValidator()
 
     # ------------------------------------------------------
-    # Signal Fusion
+    # Fusion
     # ------------------------------------------------------
 
     fusion_engine = SignalFusionEngine()
@@ -330,7 +402,9 @@ def create_bot():
 
         derivatives_engine=derivatives_engine,
 
-        market_context_engine=market_context_engine,
+        market_context_engine=(
+            market_context_engine
+        ),
 
         setup_validator=setup_validator,
 
@@ -362,10 +436,6 @@ def perform_scan():
     global last_scan_status
     global scan_running
 
-    # ------------------------------------------------------
-    # Prevent duplicate scans
-    # ------------------------------------------------------
-
     if not scan_lock.acquire(
         blocking=False
     ):
@@ -396,20 +466,22 @@ def perform_scan():
             "🔍 Starting market scan..."
         )
 
-        last_scan_status = (
-            "RUNNING"
-        )
+        last_scan_status = "RUNNING"
 
         # --------------------------------------------------
         # Run Scanner
+        #
+        # 100 by default.
+        #
+        # If SCAN_LIMIT=0:
+        # ScannerEngine scans the complete universe.
         # --------------------------------------------------
 
         results = scanner.run_scan(
-            limit=20
+            limit=SCAN_LIMIT
         )
 
         if results is None:
-
             results = []
 
         candidates = [
@@ -432,25 +504,29 @@ def perform_scan():
         for candidate in candidates:
 
             logger.info(
-                "⭐ Candidate: %s | Score: %s | Direction: %s",
-                candidate.get("symbol"),
-                candidate.get("score"),
-                candidate.get("direction"),
+                "⭐ Candidate: %s | "
+                "Score: %s | "
+                "Direction: %s",
+                candidate.get(
+                    "symbol"
+                ),
+                candidate.get(
+                    "score"
+                ),
+                candidate.get(
+                    "direction"
+                ),
             )
 
         # --------------------------------------------------
         # Final Status
         # --------------------------------------------------
 
-        last_scan_status = (
-            "SUCCESS"
-        )
+        last_scan_status = "SUCCESS"
 
-        last_scan_time = (
-            time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(),
-            )
+        last_scan_time = time.strftime(
+            "%Y-%m-%d %H:%M:%S UTC",
+            time.gmtime(),
         )
 
         logger.info(
@@ -459,15 +535,11 @@ def perform_scan():
 
     except Exception as exc:
 
-        last_scan_status = (
-            "ERROR"
-        )
+        last_scan_status = "ERROR"
 
-        last_scan_time = (
-            time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(),
-            )
+        last_scan_time = time.strftime(
+            "%Y-%m-%d %H:%M:%S UTC",
+            time.gmtime(),
         )
 
         logger.exception(
@@ -488,34 +560,9 @@ def perform_scan():
 
 def scheduler_loop():
 
-    try:
-
-        scan_interval = int(
-            os.getenv(
-                "SCAN_INTERVAL",
-                "3600",
-            )
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        scan_interval = 3600
-
-    if scan_interval < 60:
-
-        logger.warning(
-            "⚠️ SCAN_INTERVAL too low. "
-            "Using minimum 60 seconds."
-        )
-
-        scan_interval = 60
-
     logger.info(
         "⏰ Scanner interval: %s seconds",
-        scan_interval,
+        SCAN_INTERVAL,
     )
 
     # ------------------------------------------------------
@@ -533,7 +580,7 @@ def scheduler_loop():
         try:
 
             time.sleep(
-                scan_interval
+                SCAN_INTERVAL
             )
 
             perform_scan()
@@ -560,10 +607,6 @@ def initialize_bot():
     global bot_started
     global bot_initializing
 
-    # ------------------------------------------------------
-    # Already Started
-    # ------------------------------------------------------
-
     if bot_started:
 
         logger.info(
@@ -571,10 +614,6 @@ def initialize_bot():
         )
 
         return
-
-    # ------------------------------------------------------
-    # Prevent Duplicate Initialization
-    # ------------------------------------------------------
 
     if not startup_lock.acquire(
         blocking=False
@@ -611,7 +650,7 @@ def initialize_bot():
         )
 
         # --------------------------------------------------
-        # Telegram Startup Message
+        # Telegram Startup
         # --------------------------------------------------
 
         try:
@@ -632,7 +671,7 @@ def initialize_bot():
             )
 
         # --------------------------------------------------
-        # Scheduler Thread
+        # Scheduler
         # --------------------------------------------------
 
         thread = threading.Thread(
@@ -664,7 +703,7 @@ def initialize_bot():
 
 
 # ==========================================================
-# Manual Scan Endpoint
+# Manual Scan
 # ==========================================================
 
 @app.route(
@@ -678,7 +717,9 @@ def manual_scan():
         return jsonify(
             {
                 "status": "error",
-                "message": "Bot is not initialized",
+                "message": (
+                    "Bot is not initialized"
+                ),
             }
         ), 503
 
@@ -687,7 +728,9 @@ def manual_scan():
         return jsonify(
             {
                 "status": "busy",
-                "message": "A scan is already running",
+                "message": (
+                    "A scan is already running"
+                ),
             }
         ), 409
 
@@ -702,7 +745,10 @@ def manual_scan():
     return jsonify(
         {
             "status": "accepted",
-            "message": "Market scan started",
+            "message": (
+                "Market scan started"
+            ),
+            "scan_limit": SCAN_LIMIT,
         }
     ), 202
 
