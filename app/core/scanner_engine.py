@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Dict, List
+import os
+from typing import Any, Dict, List, Optional
 
 
 logger = logging.getLogger("crypto-signal-bot")
@@ -19,6 +20,12 @@ class ScannerEngine:
               ↓
         SMC Analysis
               ↓
+        MTF Analysis
+              ↓
+        Derivatives
+              ↓
+        Market Context
+              ↓
         Signal Fusion
               ↓
         Quality Gate
@@ -30,9 +37,6 @@ class ScannerEngine:
         Risk Engine
               ↓
         Candidate / Rejection
-
-    This class orchestrates the workflow.
-    Individual modules keep their own calculation logic.
     """
 
     def __init__(
@@ -96,7 +100,7 @@ class ScannerEngine:
         )
 
         # ------------------------------------------------------
-        # 1. Fetch OHLCV
+        # 1. OHLCV
         # ------------------------------------------------------
 
         try:
@@ -122,16 +126,7 @@ class ScannerEngine:
                 "error": str(exc),
             }
 
-        # ------------------------------------------------------
-        # Validate OHLCV
-        # ------------------------------------------------------
-
         if df is None:
-
-            logger.warning(
-                "OHLCV returned None | %s",
-                symbol,
-            )
 
             return {
                 "status": "SKIPPED",
@@ -139,12 +134,11 @@ class ScannerEngine:
                 "reason": "NO_OHLCV_DATA",
             }
 
-        if getattr(df, "empty", True):
-
-            logger.warning(
-                "OHLCV empty | %s",
-                symbol,
-            )
+        if getattr(
+            df,
+            "empty",
+            True,
+        ):
 
             return {
                 "status": "SKIPPED",
@@ -174,7 +168,7 @@ class ScannerEngine:
         )
 
         # ------------------------------------------------------
-        # 2. Technical Analysis
+        # 2. Technical
         # ------------------------------------------------------
 
         technical_result: Dict[str, Any] = {}
@@ -184,7 +178,9 @@ class ScannerEngine:
             try:
 
                 technical_result = (
-                    self.technical_engine.analyze(df)
+                    self.technical_engine.analyze(
+                        df
+                    )
                     or {}
                 )
 
@@ -201,15 +197,8 @@ class ScannerEngine:
                     exc,
                 )
 
-        else:
-
-            logger.warning(
-                "⚠️ Technical engine not configured | %s",
-                symbol,
-            )
-
         # ------------------------------------------------------
-        # 3. SMC Analysis
+        # 3. SMC
         # ------------------------------------------------------
 
         smc_result: Dict[str, Any] = {}
@@ -219,7 +208,9 @@ class ScannerEngine:
             try:
 
                 smc_result = (
-                    self.smc_engine.analyze(df)
+                    self.smc_engine.analyze(
+                        df
+                    )
                     or {}
                 )
 
@@ -236,15 +227,11 @@ class ScannerEngine:
                     exc,
                 )
 
-        else:
-
-            logger.warning(
-                "⚠️ SMC engine not configured | %s",
-                symbol,
-            )
-
         # ------------------------------------------------------
-        # 4. MTF Analysis (if available)
+        # 4. MTF
+        #
+        # Existing module contract is preserved.
+        # Do not fabricate timeframe data here.
         # ------------------------------------------------------
 
         mtf_result: Dict[str, Any] = {}
@@ -272,7 +259,9 @@ class ScannerEngine:
                 )
 
         # ------------------------------------------------------
-        # 5. Derivatives Analysis (if available)
+        # 5. Derivatives
+        #
+        # Existing module contract is preserved.
         # ------------------------------------------------------
 
         derivatives_result: Dict[str, Any] = {}
@@ -300,7 +289,7 @@ class ScannerEngine:
                 )
 
         # ------------------------------------------------------
-        # 6. Market Context (if available)
+        # 6. Market Context
         # ------------------------------------------------------
 
         market_result: Dict[str, Any] = {}
@@ -310,7 +299,9 @@ class ScannerEngine:
             try:
 
                 market_result = (
-                    self.market_context_engine.analyze(symbol)
+                    self.market_context_engine.analyze(
+                        symbol
+                    )
                     or {}
                 )
 
@@ -328,7 +319,7 @@ class ScannerEngine:
                 )
 
         # ------------------------------------------------------
-        # Safety Gate
+        # Safety
         # ------------------------------------------------------
 
         if (
@@ -348,47 +339,13 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 7. Signal Fusion
+        # 7. Fusion
         # ------------------------------------------------------
 
-        fusion_result: Dict[str, Any] = {}
-
-        if self.fusion_engine:
-
-            try:
-
-                fusion_result = (
-                    self.fusion_engine.evaluate(
-                        technical=technical_result,
-                        smc=smc_result,
-                        mtf=mtf_result,
-                        derivatives=derivatives_result,
-                        market=market_result,
-                    )
-                    or {}
-                )
-
-            except Exception as exc:
-
-                logger.exception(
-                    "Fusion failed | %s: %s",
-                    symbol,
-                    exc,
-                )
-
-                return {
-                    "status": "ERROR",
-                    "symbol": symbol,
-                    "reason": "FUSION_FAILED",
-                    "error": str(exc),
-                    "technical": technical_result,
-                    "smc": smc_result,
-                }
-
-        else:
+        if not self.fusion_engine:
 
             logger.warning(
-                "⚠️ Fusion engine not configured | %s",
+                "Fusion engine not configured | %s",
                 symbol,
             )
 
@@ -396,25 +353,50 @@ class ScannerEngine:
                 "status": "SKIPPED",
                 "symbol": symbol,
                 "reason": "NO_FUSION_ENGINE",
-                "technical": technical_result,
-                "smc": smc_result,
             }
 
-        # ------------------------------------------------------
-        # Fusion Summary
-        # ------------------------------------------------------
+        try:
+
+            fusion_result = (
+                self.fusion_engine.evaluate(
+                    technical=technical_result,
+                    smc=smc_result,
+                    mtf=mtf_result,
+                    derivatives=derivatives_result,
+                    market=market_result,
+                )
+                or {}
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Fusion failed | %s: %s",
+                symbol,
+                exc,
+            )
+
+            return {
+                "status": "ERROR",
+                "symbol": symbol,
+                "reason": "FUSION_FAILED",
+                "error": str(exc),
+            }
 
         score = float(
             fusion_result.get(
                 "score",
                 0,
-            ) or 0
+            )
+            or 0
         )
 
-        direction = fusion_result.get(
-            "direction",
-            "NEUTRAL",
-        )
+        direction = str(
+            fusion_result.get(
+                "direction",
+                "NEUTRAL",
+            )
+        ).upper()
 
         grade = fusion_result.get(
             "grade",
@@ -441,15 +423,21 @@ class ScannerEngine:
 
         # ------------------------------------------------------
         # 8. Quality Gate
-        # ------------------------------------------------------
         #
         # IMPORTANT:
-        # We do NOT call Gemini for weak setups.
+        # 70 remains the minimum quality threshold.
         #
-        # This protects API usage.
-        #
+        # This threshold does NOT discriminate by market cap.
+        # A low-cap coin can pass exactly like a large-cap coin
+        # when its analysis score is strong enough.
+        # ------------------------------------------------------
 
-        minimum_score = 70.0
+        minimum_score = float(
+            os.getenv(
+                "MIN_SIGNAL_SCORE",
+                "70",
+            )
+        )
 
         if score < minimum_score:
 
@@ -499,7 +487,7 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 9. Gemini Review
+        # 9. Gemini
         # ------------------------------------------------------
 
         gemini_result: Dict[str, Any] = {}
@@ -544,10 +532,9 @@ class ScannerEngine:
                 }
 
         # ------------------------------------------------------
-        # 10. Gemini Decision Gate
+        # 10. Gemini Gate
         # ------------------------------------------------------
 
-        # Check both 'decision' and 'verdict' fields
         gemini_decision = str(
             gemini_result.get(
                 "decision",
@@ -622,7 +609,7 @@ class ScannerEngine:
                 }
 
         # ------------------------------------------------------
-        # 12. Risk Engine
+        # 12. Risk
         # ------------------------------------------------------
 
         risk_result: Dict[str, Any] = {}
@@ -660,7 +647,7 @@ class ScannerEngine:
                 }
 
         # ------------------------------------------------------
-        # 13. Final Risk Gate
+        # 13. Risk Gate
         # ------------------------------------------------------
 
         risk_decision = str(
@@ -704,7 +691,7 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 14. FINAL CANDIDATE
+        # 14. Candidate
         # ------------------------------------------------------
 
         logger.info(
@@ -735,7 +722,7 @@ class ScannerEngine:
 
     def run_scan(
         self,
-        limit: int = 20,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
 
         logger.info(
@@ -764,14 +751,6 @@ class ScannerEngine:
                 }
             ]
 
-        if universe is None:
-
-            logger.warning(
-                "Coin universe returned None"
-            )
-
-            return []
-
         if not universe:
 
             logger.warning(
@@ -785,33 +764,62 @@ class ScannerEngine:
             len(universe),
         )
 
-        results: List[Dict[str, Any]] = []
-
         # ------------------------------------------------------
-        # Scan selected coins
+        # Determine scan limit
         # ------------------------------------------------------
 
-        selected_coins = universe[:limit]
+        if limit is None:
+
+            env_limit = os.getenv(
+                "SCAN_LIMIT",
+                "100",
+            )
+
+            try:
+
+                limit = int(
+                    env_limit
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                limit = 100
+
+        # ------------------------------------------------------
+        # limit <= 0 means scan entire universe.
+        # ------------------------------------------------------
+
+        if limit <= 0:
+
+            selected_coins = universe
+
+        else:
+
+            selected_coins = universe[
+                :limit
+            ]
 
         logger.info(
-            "🔎 Scanning %s coins",
+            "🔎 Scanning %s/%s coins",
             len(selected_coins),
+            len(universe),
         )
+
+        results: List[
+            Dict[str, Any]
+        ] = []
+
+        # ------------------------------------------------------
+        # Scan
+        # ------------------------------------------------------
 
         for index, coin in enumerate(
             selected_coins,
             start=1,
         ):
-
-            # --------------------------------------------------
-            # Support both:
-            #
-            # {"symbol": "BTCUSDT"}
-            #
-            # and
-            #
-            # "BTCUSDT"
-            # --------------------------------------------------
 
             if isinstance(
                 coin,
