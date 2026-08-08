@@ -36,6 +36,7 @@ class TechnicalEngine:
     ) -> Optional[Dict]:
 
         if df is None or df.empty:
+            logger.warning("⚠️ DataFrame is None or empty")
             return None
 
         required_columns = {
@@ -50,18 +51,52 @@ class TechnicalEngine:
             df.columns
         ):
             logger.error(
-                "❌ Missing OHLCV columns."
+                "❌ Missing OHLCV columns. Required: %s, Available: %s",
+                required_columns,
+                list(df.columns)
             )
             return None
 
-        if len(df) < 100:
-            logger.warning(
-                "⚠️ Not enough candles: %s",
-                len(df),
-            )
-            return None
+        # ==================================================
+        # Input validation and cleaning
+        # ==================================================
 
         data = df.copy()
+
+        # Convert to numeric and handle invalid values
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        for column in numeric_columns:
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        # Remove rows with invalid OHLCV values
+        data = data.replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
+
+        data = data.dropna(
+            subset=numeric_columns
+        ).reset_index(drop=True)
+
+        # Minimum candle requirement (200+ recommended for EMA200)
+        MIN_CANDLES = 200
+        if len(data) < MIN_CANDLES:
+            logger.warning(
+                "⚠️ Not enough valid OHLCV candles: %s (need at least %s)",
+                len(data),
+                MIN_CANDLES
+            )
+            return None
 
         # ==================================================
         # EMA
@@ -197,7 +232,7 @@ class TechnicalEngine:
         )
 
         # ==================================================
-        # Remove incomplete indicator rows
+        # Clean infinite and NaN values
         # ==================================================
 
         data = data.replace(
@@ -205,15 +240,45 @@ class TechnicalEngine:
             np.nan,
         )
 
-        data = data.dropna().reset_index(
-            drop=True
-        )
+        # Only drop rows where critical analysis columns are NaN
+        critical_columns = [
+            "close",
+            "ema20",
+            "ema50",
+            "ema200",
+            "rsi",
+            "macd",
+            "macd_signal",
+            "macd_histogram",
+            "adx",
+            "di_plus",
+            "di_minus",
+            "atr",
+            "obv",
+            "vwap",
+            "volume_ratio",
+            "recent_support",
+            "recent_resistance",
+        ]
 
-        if data.empty:
+        data = data.dropna(
+            subset=critical_columns
+        ).reset_index(drop=True)
+
+        # ==================================================
+        # ✅ FIX: Ensure at least 2 rows for comparison
+        # ==================================================
+
+        MIN_ROWS_FOR_COMPARISON = 2
+        if len(data) < MIN_ROWS_FOR_COMPARISON:
+            logger.warning(
+                "⚠️ Insufficient valid rows after indicator calculation: %s (need at least %s)",
+                len(data),
+                MIN_ROWS_FOR_COMPARISON
+            )
             return None
 
         latest = data.iloc[-1]
-
         previous = data.iloc[-2]
 
         close = float(latest["close"])
@@ -479,5 +544,12 @@ class TechnicalEngine:
                 latest["recent_resistance"]
             ),
         }
+
+        logger.debug(
+            "✅ Technical analysis complete | Trend: %s | RSI: %.1f | ADX: %.1f",
+            trend,
+            rsi,
+            adx_value
+        )
 
         return result
