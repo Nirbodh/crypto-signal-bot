@@ -70,11 +70,11 @@ from app.universe.liquidity_ranker import (
     LiquidityRanker,
 )
 
-from app.analysis.technical_engine import (
+from app.technical.technical_engine import (
     TechnicalEngine,
 )
 
-from app.analysis.smc_engine import (
+from app.smc.smc_engine import (
     SMCEngine,
 )
 
@@ -82,15 +82,15 @@ from app.analysis.mtf_engine import (
     MultiTimeframeEngine,
 )
 
-from app.analysis.derivatives_engine import (
+from app.derivatives.derivatives_engine import (
     DerivativesEngine,
 )
 
-from app.analysis.market_context import (
+from app.market.market_context import (
     MarketContextEngine,
 )
 
-from app.analysis.setup_validator import (
+from app..setup_validator import (
     SMCSetupValidator,
 )
 
