@@ -481,11 +481,85 @@ class TechnicalEngine:
         )
 
         # ==================================================
+        # Calculate Technical Score (0-100)
+        # ==================================================
+
+        # 1. Trend Score (0-25)
+        if trend == "BULLISH":
+            trend_score = 25
+        elif trend == "MIXED":
+            trend_score = 12
+        else:  # BEARISH
+            trend_score = 0
+
+        # 2. RSI Score (0-20)
+        if rsi_state == "EXTREME_OVERSOLD":
+            rsi_score = 20
+        elif rsi_state == "OVERSOLD":
+            rsi_score = 15
+        elif rsi_state == "RECOVERY_ZONE":
+            rsi_score = 10
+        elif rsi_state == "MOMENTUM":
+            rsi_score = 5
+        else:  # OVERBOUGHT
+            rsi_score = 0
+
+        # 3. MACD Score (0-20)
+        if macd_state == "BULLISH_CROSS":
+            macd_score = 20
+        elif macd_state == "BULLISH":
+            macd_score = 10
+        else:  # BEARISH or BEARISH_CROSS
+            macd_score = 0
+
+        # 4. ADX Score (0-15)
+        if adx_state == "STRONG_TREND":
+            adx_score = 15
+        elif adx_state == "DEVELOPING_TREND":
+            adx_score = 8
+        else:  # WEAK_TREND
+            adx_score = 0
+
+        # 5. Volume Score (0-10)
+        if volume_state in ["EXTREME_SPIKE", "STRONG_SPIKE"]:
+            volume_score = 10
+        elif volume_state == "ELEVATED":
+            volume_score = 5
+        else:
+            volume_score = 0
+
+        # 6. OBV Score (0-10)
+        if obv_state == "RISING":
+            obv_score = 10
+        elif obv_state == "FLAT":
+            obv_score = 5
+        else:  # FALLING
+            obv_score = 0
+
+        # Total Score (max 100)
+        total_score = trend_score + rsi_score + macd_score + adx_score + volume_score + obv_score
+        total_score = min(total_score, 100)
+
+        # ==================================================
         # Result
         # ==================================================
 
         result = {
             "price": close,
+
+            # ⭐ CRITICAL: These are required by Fusion Engine
+            "score": total_score,
+            "direction": trend,
+
+            # Debug info (optional)
+            "score_breakdown": {
+                "trend": trend_score,
+                "rsi": rsi_score,
+                "macd": macd_score,
+                "adx": adx_score,
+                "volume": volume_score,
+                "obv": obv_score,
+            },
 
             "trend": trend,
 
@@ -545,11 +619,12 @@ class TechnicalEngine:
             ),
         }
 
-        logger.debug(
-            "✅ Technical analysis complete | Trend: %s | RSI: %.1f | ADX: %.1f",
+        logger.info(
+            "✅ Technical analysis complete | Trend: %s | RSI: %.1f | ADX: %.1f | Score: %.1f",
             trend,
             rsi,
-            adx_value
+            adx_value,
+            total_score
         )
 
         return result
