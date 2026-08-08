@@ -1,7 +1,9 @@
 import logging
 import os
+import threading
 import time
 
+from flask import Flask, jsonify
 
 from app.scanner.coin_universe import (
     CoinUniverseEngine,
@@ -23,9 +25,6 @@ from app.telegram.telegram_bot import (
     TelegramBot,
 )
 
-
-# Future modules
-
 from app.fusion.signal_fusion import (
     SignalFusionEngine,
 )
@@ -38,9 +37,6 @@ from app.execution.trade_plan import (
     TradePlanEngine,
 )
 
-
-# Advanced liquidity layer
-
 from app.data.market_data import (
     MarketDataEngine,
 )
@@ -50,32 +46,81 @@ from app.universe.liquidity_ranker import (
 )
 
 
-
 # ==========================================================
 # Logging
 # ==========================================================
 
 logging.basicConfig(
-
     level=logging.INFO,
-
     format=(
         "%(asctime)s | "
         "%(levelname)s | "
         "%(message)s"
-    )
-
+    ),
 )
-
 
 logger = logging.getLogger(
     "crypto-signal-bot"
 )
 
 
+# ==========================================================
+# Flask
+# ==========================================================
+
+app = Flask(__name__)
+
 
 # ==========================================================
-# Create Bot
+# Global state
+# ==========================================================
+
+scanner = None
+telegram = None
+market_data = None
+
+last_scan_time = None
+last_scan_status = "NOT_STARTED"
+
+bot_started = False
+
+
+# ==========================================================
+# Health Endpoint
+# ==========================================================
+
+@app.route("/health", methods=["GET"])
+def health():
+
+    return jsonify(
+        {
+            "status": "ok",
+            "service": "crypto-signal-bot",
+            "bot_started": bot_started,
+            "last_scan": last_scan_time,
+            "last_scan_status": last_scan_status,
+        }
+    ), 200
+
+
+# ==========================================================
+# Root Endpoint
+# ==========================================================
+
+@app.route("/", methods=["GET"])
+def root():
+
+    return jsonify(
+        {
+            "service": "Crypto Signal Bot",
+            "status": "running",
+            "health": "/health",
+        }
+    ), 200
+
+
+# ==========================================================
+# Build Bot
 # ==========================================================
 
 def create_bot():
@@ -84,25 +129,25 @@ def create_bot():
         "🚀 Initializing Crypto Signal Bot..."
     )
 
-
-    # -----------------------------
+    # ------------------------------------------------------
     # Market Data
-    # -----------------------------
+    # ------------------------------------------------------
 
-    market_data = MarketDataEngine()
-
+    market_data_engine = (
+        MarketDataEngine()
+    )
 
     try:
 
-        status = (
-            market_data.load_markets()
+        market_status = (
+            market_data_engine
+            .load_markets()
         )
 
         logger.info(
             "Exchange status: %s",
-            status,
+            market_status,
         )
-
 
     except Exception as exc:
 
@@ -111,48 +156,42 @@ def create_bot():
             exc,
         )
 
+    # ------------------------------------------------------
+    # Coin Universe
+    # ------------------------------------------------------
 
-
-    # -----------------------------
-    # Universe
-    # -----------------------------
-
-    coin_universe = CoinUniverseEngine(
-
-        max_coins=100
-
+    coin_engine = (
+        CoinUniverseEngine(
+            max_coins=100
+        )
     )
 
+    # ------------------------------------------------------
+    # Liquidity
+    # ------------------------------------------------------
 
-    # -----------------------------
-    # Liquidity Ranking
-    # -----------------------------
-
-    liquidity = LiquidityRanker(
-        market_data
+    liquidity_ranker = (
+        LiquidityRanker(
+            market_data_engine
+        )
     )
-
 
     try:
 
         ranked = (
-            liquidity.build_ranked_universe(
-
+            liquidity_ranker
+            .build_ranked_universe(
                 minimum_volume=1_000_000,
-
-                maximum_coins=250
-
+                maximum_coins=250,
             )
         )
-
 
         if not ranked.empty:
 
             logger.info(
-                "Top liquid coins loaded: %s",
+                "🏆 Liquid universe: %s coins",
                 len(ranked),
             )
-
 
     except Exception as exc:
 
@@ -161,181 +200,252 @@ def create_bot():
             exc,
         )
 
+    # ------------------------------------------------------
+    # Engines
+    # ------------------------------------------------------
 
+    ohlcv_engine = (
+        OHLCVFetcher()
+    )
 
-    # -----------------------------
-    # Analysis Engines
-    # -----------------------------
+    fusion_engine = (
+        SignalFusionEngine()
+    )
 
-    ohlcv = OHLCVFetcher()
+    gemini_engine = (
+        GeminiReviewer()
+    )
 
+    trade_plan_engine = (
+        TradePlanEngine()
+    )
 
-    fusion = SignalFusionEngine()
+    risk_engine = (
+        RiskEngine()
+    )
 
+    telegram_bot = (
+        TelegramBot()
+    )
 
-    gemini = GeminiReviewer()
+    # ------------------------------------------------------
+    # Scanner
+    # ------------------------------------------------------
 
+    scanner_engine = ScannerEngine(
 
-    trade_plan = TradePlanEngine()
+        coin_universe=coin_engine,
 
+        ohlcv_fetcher=ohlcv_engine,
 
-    risk = RiskEngine()
+        fusion_engine=fusion_engine,
 
+        gemini_reviewer=gemini_engine,
 
-    telegram = TelegramBot()
+        trade_plan_engine=trade_plan_engine,
 
+        risk_engine=risk_engine,
 
+        telegram_bot=telegram_bot,
+    )
 
-    # -----------------------------
-    # Main Engine
-    # -----------------------------
-
-    scanner = ScannerEngine(
-
-        coin_universe=coin_universe,
-
-        ohlcv_fetcher=ohlcv,
-
-        fusion_engine=fusion,
-
-        gemini_reviewer=gemini,
-
-        trade_plan_engine=trade_plan,
-
-        risk_engine=risk,
-
-        telegram_bot=telegram,
-
+    return (
+        scanner_engine,
+        telegram_bot,
+        market_data_engine,
     )
 
 
-    return scanner, telegram, market_data
-
-
-
-
 # ==========================================================
-# Worker
+# Scan
 # ==========================================================
 
-def main():
+def perform_scan():
 
+    global last_scan_time
+    global last_scan_status
 
-    scanner, telegram, market_data = (
-        create_bot()
-    )
+    try:
 
-
-    interval = int(
-
-        os.getenv(
-
-            "SCAN_INTERVAL",
-
-            3600
-
+        logger.info(
+            "🔍 Starting market scan..."
         )
 
+        results = (
+            scanner.run_scan(
+                limit=20
+            )
+        )
+
+        candidates = [
+            item
+            for item in results
+            if item.get("status")
+            == "CANDIDATE"
+        ]
+
+        logger.info(
+            "🎯 Candidates found: %s",
+            len(candidates),
+        )
+
+        # --------------------------------------------------
+        # Telegram
+        # --------------------------------------------------
+
+        for candidate in candidates:
+
+            logger.info(
+                "⭐ Candidate: %s",
+                candidate.get(
+                    "symbol"
+                ),
+            )
+
+            # Final Telegram signal formatting
+            # will be connected after the
+            # signal schema is locked.
+
+        last_scan_status = (
+            "SUCCESS"
+        )
+
+        last_scan_time = (
+            time.strftime(
+                "%Y-%m-%d %H:%M:%S UTC",
+                time.gmtime(),
+            )
+        )
+
+        logger.info(
+            "✅ Scan completed"
+        )
+
+    except Exception as exc:
+
+        last_scan_status = (
+            "ERROR"
+        )
+
+        logger.exception(
+            "❌ Scan failed: %s",
+            exc,
+        )
+
+
+# ==========================================================
+# Scheduler
+# ==========================================================
+
+def scheduler_loop():
+
+    scan_interval = int(
+        os.getenv(
+            "SCAN_INTERVAL",
+            "3600",
+        )
     )
-
-
 
     logger.info(
-        "✅ Bot is running 24/7"
+        "⏰ Scanner interval: %s seconds",
+        scan_interval,
     )
 
+    # Initial scan
 
-    telegram.send_status(
-        "🟢 Crypto Signal Bot Started"
-    )
-
-
+    perform_scan()
 
     while True:
 
-
-        try:
-
-
-            logger.info(
-                "🔍 Starting market scan..."
-            )
-
-
-            results = (
-                scanner.run_scan(
-                    limit=20
-                )
-            )
-
-
-            candidates = [
-
-                x
-
-                for x in results
-
-                if x.get(
-                    "status"
-                )
-                == "CANDIDATE"
-
-            ]
-
-
-
-            logger.info(
-                "🎯 Found candidates: %s",
-                len(candidates),
-            )
-
-
-
-            for signal in candidates:
-
-
-                logger.info(
-                    "⭐ %s",
-                    signal.get(
-                        "symbol"
-                    ),
-                )
-
-
-                # Telegram final connection
-                # will be activated after
-                # signal schema locking.
-
-
-
-            logger.info(
-                "✅ Scan finished"
-            )
-
-
-
-        except Exception as exc:
-
-
-            logger.exception(
-                "Scanner error: %s",
-                exc,
-            )
-
-
-
-        logger.info(
-            "Sleeping %s seconds",
-            interval,
-        )
-
-
         time.sleep(
-            interval
+            scan_interval
         )
 
+        perform_scan()
 
+
+# ==========================================================
+# Startup
+# ==========================================================
+
+def initialize_bot():
+
+    global scanner
+    global telegram
+    global market_data
+    global bot_started
+
+    logger.info(
+        "⚙️ Creating bot components..."
+    )
+
+    (
+        scanner,
+        telegram,
+        market_data,
+    ) = create_bot()
+
+    bot_started = True
+
+    logger.info(
+        "🟢 Bot initialized successfully"
+    )
+
+    # ------------------------------------------------------
+    # Telegram startup message
+    # ------------------------------------------------------
+
+    try:
+
+        telegram.send_status(
+            "🟢 Crypto Signal Bot started on Render"
+        )
+
+    except Exception as exc:
+
+        logger.warning(
+            "Telegram startup message failed: %s",
+            exc,
+        )
+
+    # ------------------------------------------------------
+    # Scheduler thread
+    # ------------------------------------------------------
+
+    thread = threading.Thread(
+        target=scheduler_loop,
+        daemon=True,
+    )
+
+    thread.start()
+
+    logger.info(
+        "⏰ Scheduler started"
+    )
+
+
+# ==========================================================
+# Main
+# ==========================================================
 
 if __name__ == "__main__":
 
-    main()
+    initialize_bot()
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000",
+        )
+    )
+
+    logger.info(
+        "🌐 Starting web server on port %s",
+        port,
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        threaded=True,
+    )
