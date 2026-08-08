@@ -13,97 +13,176 @@ class MarketDataEngine:
     Public market-data engine.
 
     Exchanges:
-    - Binance
-    - MEXC
-    - KuCoin
+        - Binance
+        - MEXC
+        - KuCoin
 
     No private API keys are required.
     """
 
-    def __init__(self):
-        self.exchanges = {}
+    def __init__(self) -> None:
 
-        exchange_configs = {
-            "binance": ccxt.binance({
-                "enableRateLimit": True,
-            }),
-            "mexc": ccxt.mexc({
-                "enableRateLimit": True,
-            }),
-            "kucoin": ccxt.kucoin({
-                "enableRateLimit": True,
-            }),
+        self.exchanges: Dict[str, ccxt.Exchange] = {}
+
+        configs = {
+            "binance": ccxt.binance,
+            "mexc": ccxt.mexc,
+            "kucoin": ccxt.kucoin,
         }
 
-        for name, exchange in exchange_configs.items():
-            self.exchanges[name] = exchange
+        for name, exchange_class in configs.items():
+
+            try:
+                self.exchanges[name] = exchange_class(
+                    {
+                        "enableRateLimit": True,
+                    }
+                )
+
+                logger.info(
+                    "Exchange initialized: %s",
+                    name,
+                )
+
+            except Exception as exc:
+
+                logger.error(
+                    "Failed to initialize %s: %s",
+                    name,
+                    exc,
+                )
+
+    # ======================================================
+    # Load Markets
+    # ======================================================
 
     def load_markets(self) -> Dict[str, int]:
-        """
-        Load markets from all exchanges.
 
-        Returns:
-            Dictionary containing number of markets per exchange.
-        """
-
-        result = {}
+        result: Dict[str, int] = {}
 
         for name, exchange in self.exchanges.items():
+
             try:
+
                 markets = exchange.load_markets()
+
                 result[name] = len(markets)
 
                 logger.info(
-                    "✅ %s markets loaded: %s",
+                    "Markets loaded | %s | %s",
                     name,
                     len(markets),
                 )
 
             except Exception as exc:
+
                 logger.error(
-                    "❌ Failed loading %s markets: %s",
+                    "Market loading failed | %s | %s",
                     name,
                     exc,
                 )
+
                 result[name] = 0
 
         return result
+
+    # ======================================================
+    # USDT Symbols
+    # ======================================================
 
     def get_usdt_symbols(
         self,
         exchange_name: str,
     ) -> List[str]:
-        """
-        Return active USDT spot symbols.
-        """
 
-        exchange = self.exchanges.get(exchange_name)
+        exchange = self.exchanges.get(
+            exchange_name
+        )
 
         if exchange is None:
+
+            logger.warning(
+                "Unknown exchange: %s",
+                exchange_name,
+            )
+
             return []
 
         try:
+
             markets = exchange.load_markets()
 
-            symbols = []
+            symbols: List[str] = []
 
             for symbol, market in markets.items():
-                if (
-                    market.get("active", True)
-                    and market.get("spot", False)
-                    and market.get("quote") == "USDT"
+
+                if not market.get(
+                    "active",
+                    True,
                 ):
-                    symbols.append(symbol)
+                    continue
+
+                if not market.get(
+                    "spot",
+                    False,
+                ):
+                    continue
+
+                if market.get(
+                    "quote"
+                ) != "USDT":
+                    continue
+
+                symbols.append(symbol)
 
             return sorted(symbols)
 
         except Exception as exc:
+
             logger.error(
-                "❌ Failed getting USDT symbols from %s: %s",
+                "USDT symbol loading failed | %s | %s",
                 exchange_name,
                 exc,
             )
+
             return []
+
+    # ======================================================
+    # Exchange Order
+    # ======================================================
+
+    def _exchange_order(
+        self,
+        preferred_exchange: str,
+    ) -> List[str]:
+
+        default_order = [
+            "binance",
+            "mexc",
+            "kucoin",
+        ]
+
+        order: List[str] = []
+
+        if preferred_exchange in self.exchanges:
+
+            order.append(
+                preferred_exchange
+            )
+
+        for name in default_order:
+
+            if name not in order:
+
+                if name in self.exchanges:
+
+                    order.append(name)
+
+        return order
+
+    # ======================================================
+    # OHLCV
+    # ======================================================
 
     def fetch_ohlcv(
         self,
@@ -112,77 +191,134 @@ class MarketDataEngine:
         limit: int = 250,
         preferred_exchange: str = "binance",
     ) -> Optional[pd.DataFrame]:
-        """
-        Fetch OHLCV data.
 
-        Columns:
-        timestamp, open, high, low, close, volume
-        """
+        exchanges = self._exchange_order(
+            preferred_exchange
+        )
 
-        exchange = self.exchanges.get(preferred_exchange)
+        for exchange_name in exchanges:
 
-        if exchange is None:
-            logger.error(
-                "Unknown exchange: %s",
-                preferred_exchange,
-            )
-            return None
-
-        try:
-            ohlcv = exchange.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                limit=limit,
+            exchange = self.exchanges.get(
+                exchange_name
             )
 
-            if not ohlcv:
-                return None
+            if exchange is None:
+                continue
 
-            df = pd.DataFrame(
-                ohlcv,
-                columns=[
-                    "timestamp",
+            try:
+
+                if not exchange.markets:
+
+                    exchange.load_markets()
+
+                if symbol not in exchange.markets:
+
+                    logger.debug(
+                        "Symbol unavailable | %s | %s",
+                        exchange_name,
+                        symbol,
+                    )
+
+                    continue
+
+                if not exchange.has.get(
+                    "fetchOHLCV",
+                    False,
+                ):
+
+                    continue
+
+                ohlcv = exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    limit=limit,
+                )
+
+                if not ohlcv:
+
+                    continue
+
+                df = pd.DataFrame(
+                    ohlcv,
+                    columns=[
+                        "timestamp",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ],
+                )
+
+                df["timestamp"] = pd.to_datetime(
+                    df["timestamp"],
+                    unit="ms",
+                    utc=True,
+                )
+
+                numeric_columns = [
                     "open",
                     "high",
                     "low",
                     "close",
                     "volume",
-                ],
-            )
+                ]
 
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"],
-                unit="ms",
-                utc=True,
-            )
+                for column in numeric_columns:
 
-            numeric_columns = [
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-            ]
+                    df[column] = pd.to_numeric(
+                        df[column],
+                        errors="coerce",
+                    )
 
-            for column in numeric_columns:
-                df[column] = pd.to_numeric(
-                    df[column],
-                    errors="coerce",
+                df = df.dropna()
+
+                df = df.drop_duplicates(
+                    subset=["timestamp"]
                 )
 
-            df = df.dropna().reset_index(drop=True)
+                df = df.sort_values(
+                    "timestamp"
+                )
 
-            return df
+                df = df.reset_index(
+                    drop=True
+                )
 
-        except Exception as exc:
-            logger.error(
-                "❌ OHLCV failed | %s | %s | %s",
-                preferred_exchange,
-                symbol,
-                exc,
-            )
+                if df.empty:
 
-            return None
+                    continue
+
+                logger.debug(
+                    "OHLCV success | %s | %s | %s | rows=%s",
+                    exchange_name,
+                    symbol,
+                    timeframe,
+                    len(df),
+                )
+
+                return df
+
+            except Exception as exc:
+
+                logger.warning(
+                    "OHLCV failed | %s | %s | %s",
+                    exchange_name,
+                    symbol,
+                    exc,
+                )
+
+        logger.error(
+            "OHLCV unavailable on all exchanges | %s | %s",
+            symbol,
+            timeframe,
+        )
+
+        return None
+
+    # ======================================================
+    # Ticker
+    # ======================================================
 
     def get_ticker(
         self,
@@ -190,140 +326,79 @@ class MarketDataEngine:
         preferred_exchange: str = "binance",
     ) -> Optional[Dict]:
 
-        exchange = self.exchanges.get(preferred_exchange)
+        exchanges = self._exchange_order(
+            preferred_exchange
+        )
 
-        if exchange is None:
-            return None
+        for exchange_name in exchanges:
 
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-
-            return {
-                "symbol": symbol,
-                "last": ticker.get("last"),
-                "bid": ticker.get("bid"),
-                "ask": ticker.get("ask"),
-                "base_volume": ticker.get("baseVolume"),
-                "quote_volume": ticker.get("quoteVolume"),
-                "timestamp": ticker.get("timestamp"),
-            }
-
-        except Exception as exc:
-            logger.error(
-                "❌ Ticker failed | %s | %s | %s",
-                preferred_exchange,
-                symbol,
-                exc,
+            exchange = self.exchanges.get(
+                exchange_name
             )
 
-            return None        self,
-        symbol: str,
-        timeframe: str = "15m",
-        limit: int = 250,
-        preferred_exchange: str = "binance",
-    ) -> Optional[pd.DataFrame]:
-        """
-        Fetch OHLCV data.
+            if exchange is None:
+                continue
 
-        Columns:
-        timestamp, open, high, low, close, volume
-        """
+            try:
 
-        exchange = self.exchanges.get(preferred_exchange)
+                if not exchange.markets:
 
-        if exchange is None:
-            logger.error(
-                "Unknown exchange: %s",
-                preferred_exchange,
-            )
-            return None
+                    exchange.load_markets()
 
-        try:
-            ohlcv = exchange.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                limit=limit,
-            )
+                if symbol not in exchange.markets:
 
-            if not ohlcv:
-                return None
+                    continue
 
-            df = pd.DataFrame(
-                ohlcv,
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                ],
-            )
-
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"],
-                unit="ms",
-                utc=True,
-            )
-
-            numeric_columns = [
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-            ]
-
-            for column in numeric_columns:
-                df[column] = pd.to_numeric(
-                    df[column],
-                    errors="coerce",
+                ticker = exchange.fetch_ticker(
+                    symbol
                 )
 
-            df = df.dropna().reset_index(drop=True)
+                if not ticker:
 
-            return df
+                    continue
 
-        except Exception as exc:
-            logger.error(
-                "❌ OHLCV failed | %s | %s | %s",
-                preferred_exchange,
-                symbol,
-                exc,
-            )
+                return {
+                    "symbol": symbol,
+                    "last": ticker.get("last"),
+                    "bid": ticker.get("bid"),
+                    "ask": ticker.get("ask"),
+                    "base_volume": ticker.get(
+                        "baseVolume"
+                    ),
+                    "quote_volume": ticker.get(
+                        "quoteVolume"
+                    ),
+                    "timestamp": ticker.get(
+                        "timestamp"
+                    ),
+                    "exchange": exchange_name,
+                }
 
-            return None
+            except Exception as exc:
 
-    def get_ticker(
+                logger.warning(
+                    "Ticker failed | %s | %s | %s",
+                    exchange_name,
+                    symbol,
+                    exc,
+                )
+
+        logger.error(
+            "Ticker unavailable on all exchanges | %s",
+            symbol,
+        )
+
+        return None
+
+    # ======================================================
+    # Exchange Status
+    # ======================================================
+
+    def get_exchange_status(
         self,
-        symbol: str,
-        preferred_exchange: str = "binance",
-    ) -> Optional[Dict]:
+    ) -> Dict[str, bool]:
 
-        exchange = self.exchanges.get(preferred_exchange)
-
-        if exchange is None:
-            return None
-
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-
-            return {
-                "symbol": symbol,
-                "last": ticker.get("last"),
-                "bid": ticker.get("bid"),
-                "ask": ticker.get("ask"),
-                "base_volume": ticker.get("baseVolume"),
-                "quote_volume": ticker.get("quoteVolume"),
-                "timestamp": ticker.get("timestamp"),
-            }
-
-        except Exception as exc:
-            logger.error(
-                "❌ Ticker failed | %s | %s | %s",
-                preferred_exchange,
-                symbol,
-                exc,
-            )b
-
-            return None
+        return {
+            name: True
+            for name in self.exchanges
+        }
