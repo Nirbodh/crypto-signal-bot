@@ -197,7 +197,7 @@ class TradePlanEngine:
         }
 
     # ==========================================================
-    # Main
+    # Main build_plan
     # ==========================================================
 
     def build_plan(
@@ -436,3 +436,56 @@ class TradePlanEngine:
 
             "warnings": warnings,
         }
+
+    # ==========================================================
+    # Build method for scanner compatibility
+    # ==========================================================
+
+    def build(
+        self,
+        symbol: Optional[str] = None,
+        dataframe: Any = None,
+        fusion_result: Optional[Dict[str, Any]] = None,
+        gemini_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+
+        """
+        Build trade plan from fusion result.
+
+        This method is called by ScannerEngine.
+        """
+
+        if not fusion_result:
+            return {
+                "status": "INVALID",
+                "reason": "No fusion result provided",
+            }
+
+        direction = fusion_result.get("direction", "NEUTRAL")
+        score = fusion_result.get("score", 0)
+
+        # Get price from dataframe if available
+        entry_price = 0
+        atr_value = None
+
+        if dataframe is not None and hasattr(dataframe, 'iloc'):
+            try:
+                entry_price = float(dataframe.iloc[-1]["close"])
+                # Try to get ATR if available
+                if "atr" in dataframe.columns:
+                    atr_value = float(dataframe.iloc[-1]["atr"])
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass
+
+        # If no price from dataframe, try to get from fusion result
+        if entry_price <= 0:
+            entry_price = fusion_result.get("price", 0)
+
+        # Build plan
+        return self.build_plan(
+            direction=direction,
+            entry=entry_price,
+            atr=atr_value,
+            structure_low=fusion_result.get("support"),
+            structure_high=fusion_result.get("resistance"),
+        )
