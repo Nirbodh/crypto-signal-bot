@@ -15,18 +15,48 @@ class SignalFusionEngine:
         - Multi-Timeframe Analysis (MTF)
         - Derivatives
         - Market Context
-        - Optional AI reviewer score
+        - AI Review
 
-    Design goals:
-        - Never invent missing scores
-        - Directional disagreement reduces quality
-        - Neutral modules do not create confidence
-        - Market context has limited influence
-        - AI is optional and cannot create a signal by itself
-        - Confluence measures directional agreement
-        - Minimum evidence is required for strong candidates
-        - Compatible with ScannerEngine output
+    IMPORTANT
+    ----------
+    This engine measures SETUP QUALITY.
+
+    It does NOT predict future price movement.
+
+    Core principles:
+        1. Missing data never receives a fake score.
+        2. Directional disagreement reduces quality.
+        3. Neutral modules do not create fake confidence.
+        4. AI is a reviewer, not a primary signal generator.
+        5. Market context has limited influence.
+        6. Confluence is based only on directional engines.
+        7. Minimum evidence is required before a candidate.
+        8. Score and confluence are separate concepts.
+        9. Scanner-compatible output is always returned.
     """
+
+    # ==========================================================
+    # Configuration
+    # ==========================================================
+
+    DEFAULT_WEIGHTS = {
+        "technical": 0.25,
+        "smc": 0.25,
+        "mtf": 0.20,
+        "derivatives": 0.15,
+        "market": 0.10,
+        "ai": 0.05,
+    }
+
+    DIRECTIONAL_COMPONENTS = (
+        "technical",
+        "smc",
+        "mtf",
+        "derivatives",
+    )
+
+    # Minimum directional evidence required.
+    MIN_DIRECTIONAL_COMPONENTS = 2
 
     # ==========================================================
     # Initialization
@@ -35,41 +65,21 @@ class SignalFusionEngine:
     def __init__(
         self,
         weights: Optional[Dict[str, float]] = None,
-        min_score: float = 70.0,
-        min_confluence: float = 70.0,
-        min_directional_components: int = 2,
     ) -> None:
 
-        self.weights = weights or {
-            "technical": 0.30,
-            "smc": 0.30,
-            "mtf": 0.20,
-            "derivatives": 0.15,
-            "market": 0.05,
-        }
-
-        self.min_score = float(min_score)
-        self.min_confluence = float(min_confluence)
-        self.min_directional_components = int(
-            min_directional_components
+        self.weights = dict(
+            weights
+            if weights is not None
+            else self.DEFAULT_WEIGHTS
         )
 
         self._validate_weights()
 
     # ==========================================================
-    # Validation
+    # Weight Validation
     # ==========================================================
 
     def _validate_weights(self) -> None:
-        """Validate configured fusion weights."""
-
-        if not self.weights:
-
-            raise ValueError(
-                "Fusion weights cannot be empty."
-            )
-
-        total = 0.0
 
         for name, weight in self.weights.items():
 
@@ -77,27 +87,41 @@ class SignalFusionEngine:
                 weight,
                 (int, float),
             ):
-
                 raise TypeError(
                     f"Weight for '{name}' must be numeric."
                 )
 
             if weight < 0:
-
                 raise ValueError(
                     f"Weight for '{name}' cannot be negative."
                 )
 
-            total += float(weight)
+        total = sum(
+            float(weight)
+            for weight in self.weights.values()
+        )
 
         if total <= 0:
-
             raise ValueError(
                 "At least one fusion weight must be greater than zero."
             )
 
     # ==========================================================
-    # Safe helpers
+    # Safe Dictionary
+    # ==========================================================
+
+    @staticmethod
+    def _safe_dict(
+        data: Any,
+    ) -> Dict[str, Any]:
+
+        if isinstance(data, dict):
+            return data
+
+        return {}
+
+    # ==========================================================
+    # Safe Score
     # ==========================================================
 
     @staticmethod
@@ -106,35 +130,31 @@ class SignalFusionEngine:
         default: Optional[float] = None,
     ) -> Optional[float]:
         """
-        Safely extract score.
+        Extract score safely.
 
-        Missing/invalid score remains None.
-        No artificial score is created.
+        IMPORTANT:
+        Missing score remains None.
+        No artificial 50 score is generated.
         """
 
         if not isinstance(data, dict):
-
             return default
 
         value = data.get("score")
 
         if value is None:
-
             return default
 
         try:
-
             value = float(value)
 
         except (
             TypeError,
             ValueError,
         ):
-
             return default
 
-        if value != value:  # NaN
-
+        if value != value:
             return default
 
         return max(
@@ -145,101 +165,75 @@ class SignalFusionEngine:
             ),
         )
 
+    # ==========================================================
+    # Direction
+    # ==========================================================
+
     @staticmethod
     def _direction(
         data: Any,
     ) -> str:
         """
-        Normalize module direction.
+        Normalize engine direction.
+
+        Supported:
+            BULLISH
+            BEARISH
+            NEUTRAL
+            UNKNOWN
         """
 
         if not isinstance(data, dict):
-
-            return "NEUTRAL"
+            return "UNKNOWN"
 
         direction = str(
             data.get(
                 "direction",
-                data.get(
-                    "trend",
-                    data.get(
-                        "preferred_direction",
-                        "NEUTRAL",
-                    ),
-                ),
+                "UNKNOWN",
             )
         ).upper().strip()
 
         if direction in {
             "BULLISH",
-            "LONG",
-            "BUY",
-        }:
-
-            return "BULLISH"
-
-        if direction in {
             "BEARISH",
-            "SHORT",
-            "SELL",
+            "NEUTRAL",
+            "UNKNOWN",
         }:
+            return direction
 
-            return "BEARISH"
-
-        return "NEUTRAL"
+        return "UNKNOWN"
 
     # ==========================================================
     # SMC Direction
     # ==========================================================
 
-    @classmethod
+    @staticmethod
     def _smc_direction(
-        cls,
         smc: Dict[str, Any],
     ) -> str:
-        """
-        Extract SMC directional bias.
-
-        Supports:
-            preferred_direction
-            direction
-            trend
-        """
 
         if not isinstance(smc, dict):
-
-            return "NEUTRAL"
+            return "UNKNOWN"
 
         direction = str(
             smc.get(
                 "preferred_direction",
                 smc.get(
                     "direction",
-                    smc.get(
-                        "trend",
-                        "NEUTRAL",
-                    ),
+                    "UNKNOWN",
                 ),
             )
         ).upper().strip()
 
         if direction in {
             "BULLISH",
-            "LONG",
-            "BUY",
-        }:
-
-            return "BULLISH"
-
-        if direction in {
             "BEARISH",
-            "SHORT",
-            "SELL",
+            "NEUTRAL",
+            "UNKNOWN",
         }:
+            return direction
 
-            return "BEARISH"
-
-        return "NEUTRAL"
+        return "UNKNOWN"
 
     # ==========================================================
     # SMC Score
@@ -251,26 +245,17 @@ class SignalFusionEngine:
         direction: str,
     ) -> Optional[float]:
         """
-        Extract direction-specific SMC score.
+        Supports:
 
-        Supported structures:
+            smc["bullish"]["score"]
+            smc["bearish"]["score"]
 
-            {
-                "preferred_direction": "BULLISH",
-                "bullish": {
-                    "score": 82
-                }
-            }
+        and:
 
-        or:
-
-            {
-                "score": 82
-            }
+            smc["score"]
         """
 
         if not isinstance(smc, dict):
-
             return None
 
         if direction == "BULLISH":
@@ -284,7 +269,6 @@ class SignalFusionEngine:
             )
 
             if score is not None:
-
                 return score
 
         elif direction == "BEARISH":
@@ -298,7 +282,6 @@ class SignalFusionEngine:
             )
 
             if score is not None:
-
                 return score
 
         return self._safe_score(
@@ -306,7 +289,7 @@ class SignalFusionEngine:
         )
 
     # ==========================================================
-    # Market Score
+    # Market Context Score
     # ==========================================================
 
     def _get_market_score(
@@ -315,17 +298,18 @@ class SignalFusionEngine:
         direction: str,
     ) -> Optional[float]:
         """
-        Convert market context into a limited directional score.
+        Market context is intentionally limited.
 
-        Market context can influence the final quality,
-        but it cannot dominate the technical/SMC/MTF evidence.
+        It starts from neutral 50 only AFTER valid
+        market momentum data exists.
+
+        24h movement contributes at most +/-20 points.
         """
 
         if not isinstance(
             market,
             dict,
         ):
-
             return None
 
         fundamental = market.get(
@@ -337,7 +321,6 @@ class SignalFusionEngine:
             fundamental,
             dict,
         ):
-
             fundamental = {}
 
         change = fundamental.get(
@@ -345,22 +328,17 @@ class SignalFusionEngine:
         )
 
         if change is None:
-
             change = market.get(
                 "change_24h"
             )
 
         try:
-
-            change = float(
-                change
-            )
+            change = float(change)
 
         except (
             TypeError,
             ValueError,
         ):
-
             return None
 
         score = 50.0
@@ -368,14 +346,12 @@ class SignalFusionEngine:
         if direction == "BULLISH":
 
             if change > 0:
-
                 score += min(
                     20.0,
                     change * 2.0,
                 )
 
             elif change < 0:
-
                 score -= min(
                     20.0,
                     abs(change) * 2.0,
@@ -384,14 +360,12 @@ class SignalFusionEngine:
         elif direction == "BEARISH":
 
             if change < 0:
-
                 score += min(
                     20.0,
                     abs(change) * 2.0,
                 )
 
             elif change > 0:
-
                 score -= min(
                     20.0,
                     change * 2.0,
@@ -406,7 +380,7 @@ class SignalFusionEngine:
         )
 
     # ==========================================================
-    # Directional Adjustment
+    # Directional Score Adjustment
     # ==========================================================
 
     @staticmethod
@@ -416,9 +390,9 @@ class SignalFusionEngine:
         target_direction: str,
     ) -> Optional[float]:
         """
-        Apply directional consistency penalty.
+        Direction-aware score adjustment.
 
-        Same direction:
+        Same:
             100%
 
         Neutral:
@@ -426,28 +400,34 @@ class SignalFusionEngine:
 
         Opposite:
             55%
+
+        Unknown:
+            No score contribution.
         """
 
         if score is None:
-
             return None
 
-        if target_direction == "NEUTRAL":
-
+        if target_direction not in {
+            "BULLISH",
+            "BEARISH",
+        }:
             return score
 
         if component_direction == target_direction:
-
             return score
 
         if component_direction == "NEUTRAL":
-
             return score * 0.85
 
+        if component_direction == "UNKNOWN":
+            return None
+
+        # Opposite direction.
         return score * 0.55
 
     # ==========================================================
-    # Weighted Score
+    # Weighted Fusion
     # ==========================================================
 
     def _calculate_weighted_score(
@@ -458,20 +438,17 @@ class SignalFusionEngine:
         ],
     ) -> float:
         """
-        Weighted average using ONLY available components.
+        Calculate weighted score using ONLY available components.
 
-        Missing modules receive no score and no weight.
+        Missing components are removed from the denominator.
         """
 
         weighted_total = 0.0
         active_weight = 0.0
 
-        for component, score in (
-            component_scores.items()
-        ):
+        for component, score in component_scores.items():
 
             if score is None:
-
                 continue
 
             weight = float(
@@ -482,20 +459,19 @@ class SignalFusionEngine:
             )
 
             if weight <= 0:
-
                 continue
 
             weighted_total += (
-                score * weight
+                float(score)
+                * weight
             )
 
             active_weight += weight
 
         if active_weight <= 0:
-
             return 0.0
 
-        result = (
+        score = (
             weighted_total
             / active_weight
         )
@@ -504,7 +480,7 @@ class SignalFusionEngine:
             0.0,
             min(
                 100.0,
-                result,
+                score,
             ),
         )
 
@@ -520,59 +496,63 @@ class SignalFusionEngine:
         derivatives: Dict[str, Any],
     ) -> str:
         """
-        Determine primary directional bias.
+        Determine primary direction.
 
-        Priority:
+        Directional engines:
             Technical
             MTF
             Derivatives
+            SMC tie-breaker
 
-        SMC acts as tie-breaker.
+        At least two directional votes are preferred.
+
+        If only one engine provides direction, the result
+        becomes UNKNOWN rather than pretending there is
+        strong market consensus.
         """
 
-        directional_sources = [
-            (
-                "technical",
-                self._direction(
-                    technical
-                ),
+        sources = {
+            "technical": self._direction(
+                technical
             ),
-            (
-                "mtf",
-                self._direction(
-                    mtf
-                ),
+            "mtf": self._direction(
+                mtf
             ),
-            (
-                "derivatives",
-                self._direction(
-                    derivatives
-                ),
+            "derivatives": self._direction(
+                derivatives
             ),
+        }
+
+        votes = [
+            direction
+            for direction in sources.values()
+            if direction in {
+                "BULLISH",
+                "BEARISH",
+            }
         ]
 
-        bullish = 0
-        bearish = 0
+        bullish_votes = votes.count(
+            "BULLISH"
+        )
 
-        for _, direction in (
-            directional_sources
-        ):
+        bearish_votes = votes.count(
+            "BEARISH"
+        )
 
-            if direction == "BULLISH":
+        # ------------------------------------------------------
+        # Clear majority
+        # ------------------------------------------------------
 
-                bullish += 1
-
-            elif direction == "BEARISH":
-
-                bearish += 1
-
-        if bullish > bearish:
-
+        if bullish_votes > bearish_votes:
             return "BULLISH"
 
-        if bearish > bullish:
-
+        if bearish_votes > bullish_votes:
             return "BEARISH"
+
+        # ------------------------------------------------------
+        # No majority -> SMC tie-breaker
+        # ------------------------------------------------------
 
         smc_direction = (
             self._smc_direction(
@@ -585,9 +565,37 @@ class SignalFusionEngine:
             "BEARISH",
         }:
 
-            return smc_direction
+            # SMC can break a tie only when there is
+            # at least one directional vote.
+            if votes:
+                return smc_direction
 
         return "NEUTRAL"
+
+    # ==========================================================
+    # Directional Evidence Count
+    # ==========================================================
+
+    @staticmethod
+    def _count_directional_evidence(
+        component_directions: Dict[str, str],
+    ) -> int:
+
+        return sum(
+            1
+            for component in (
+                "technical",
+                "smc",
+                "mtf",
+                "derivatives",
+            )
+            if component_directions.get(
+                component
+            ) in {
+                "BULLISH",
+                "BEARISH",
+            }
+        )
 
     # ==========================================================
     # Confluence
@@ -609,52 +617,97 @@ class SignalFusionEngine:
 
         participate.
 
-        Neutral components are ignored.
+        Neutral / Unknown modules are ignored.
         """
 
-        if target_direction == "NEUTRAL":
-
+        if target_direction not in {
+            "BULLISH",
+            "BEARISH",
+        }:
             return 0.0
-
-        directional_components = (
-            "technical",
-            "smc",
-            "mtf",
-            "derivatives",
-        )
 
         active = 0
         aligned = 0
 
         for component in (
-            directional_components
+            "technical",
+            "smc",
+            "mtf",
+            "derivatives",
         ):
 
-            direction = (
+            component_direction = (
                 component_directions.get(
                     component,
-                    "NEUTRAL",
+                    "UNKNOWN",
                 )
             )
 
-            if direction == "NEUTRAL":
-
+            if component_direction not in {
+                "BULLISH",
+                "BEARISH",
+            }:
                 continue
 
             active += 1
 
-            if direction == target_direction:
-
+            if (
+                component_direction
+                == target_direction
+            ):
                 aligned += 1
 
         if active == 0:
-
             return 0.0
 
         return (
             aligned
             / active
         ) * 100.0
+
+    # ==========================================================
+    # Minimum Evidence
+    # ==========================================================
+
+    def _minimum_evidence_ok(
+        self,
+        component_directions: Dict[str, str],
+        direction: str,
+    ) -> bool:
+
+        if direction not in {
+            "BULLISH",
+            "BEARISH",
+        }:
+            return False
+
+        evidence_count = (
+            self._count_directional_evidence(
+                component_directions
+            )
+        )
+
+        if (
+            evidence_count
+            < self.MIN_DIRECTIONAL_COMPONENTS
+        ):
+            return False
+
+        aligned_count = sum(
+            1
+            for component in (
+                "technical",
+                "smc",
+                "mtf",
+                "derivatives",
+            )
+            if component_directions.get(
+                component
+            )
+            == direction
+        )
+
+        return aligned_count >= 2
 
     # ==========================================================
     # Warnings
@@ -675,47 +728,34 @@ class SignalFusionEngine:
             str,
         ],
     ) -> list:
-        """
-        Build warnings without inventing data.
-        """
 
         warnings = []
 
         # ------------------------------------------------------
-        # Directional evidence count
+        # Minimum evidence
         # ------------------------------------------------------
 
-        directional_components = (
-            "technical",
-            "smc",
-            "mtf",
-            "derivatives",
+        evidence_count = (
+            self._count_directional_evidence(
+                component_directions
+            )
         )
 
-        active_directional = [
-            component
-            for component in directional_components
-            if component_directions.get(
-                component,
-                "NEUTRAL",
-            )
-            != "NEUTRAL"
-        ]
-
-        if len(active_directional) < (
-            self.min_directional_components
-        ):
+        if evidence_count < 2:
 
             warnings.append(
                 "Insufficient directional evidence"
             )
 
         # ------------------------------------------------------
-        # Confluence
+        # Directional disagreement
         # ------------------------------------------------------
 
         if (
-            direction != "NEUTRAL"
+            direction in {
+                "BULLISH",
+                "BEARISH",
+            }
             and confluence < 50
         ):
 
@@ -725,7 +765,10 @@ class SignalFusionEngine:
             )
 
         elif (
-            direction != "NEUTRAL"
+            direction in {
+                "BULLISH",
+                "BEARISH",
+            }
             and confluence < 70
         ):
 
@@ -749,13 +792,11 @@ class SignalFusionEngine:
 
             warnings.append(
                 "Missing analysis components: "
-                + ", ".join(
-                    missing
-                )
+                + ", ".join(missing)
             )
 
         # ------------------------------------------------------
-        # Derivatives funding
+        # Funding risk
         # ------------------------------------------------------
 
         funding = derivatives.get(
@@ -768,55 +809,33 @@ class SignalFusionEngine:
             dict,
         ):
 
-            funding_risk = str(
+            risk = str(
                 funding.get(
                     "risk",
                     "",
                 )
             ).upper()
 
-            if funding_risk == "HIGH":
+            if risk == "HIGH":
 
                 warnings.append(
                     "Extreme funding / "
                     "crowded positioning"
                 )
 
-        # ------------------------------------------------------
-        # Alternative funding structures
-        # ------------------------------------------------------
-
-        funding_rate = (
+        # Some derivatives engines may expose
+        # funding risk at top-level.
+        elif str(
             derivatives.get(
-                "funding_rate"
+                "funding_risk",
+                "",
             )
-        )
+        ).upper() == "HIGH":
 
-        try:
-
-            if funding_rate is not None:
-
-                funding_rate = float(
-                    funding_rate
-                )
-
-                # Extremely positive or negative
-                # funding indicates crowding.
-
-                if abs(
-                    funding_rate
-                ) >= 0.01:
-
-                    warnings.append(
-                        "Extreme funding rate detected"
-                    )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            pass
+            warnings.append(
+                "Extreme funding / "
+                "crowded positioning"
+            )
 
         # ------------------------------------------------------
         # MTF entry timing
@@ -836,13 +855,17 @@ class SignalFusionEngine:
                 "against primary direction"
             )
 
+        elif entry_timing == "UNAVAILABLE":
+
+            warnings.append(
+                "Entry timeframe unavailable"
+            )
+
         # ------------------------------------------------------
         # Weak components
         # ------------------------------------------------------
 
-        for name, score in (
-            component_scores.items()
-        ):
+        for name, score in component_scores.items():
 
             if (
                 score is not None
@@ -853,15 +876,7 @@ class SignalFusionEngine:
                     f"Weak {name} component"
                 )
 
-        # ------------------------------------------------------
-        # Remove duplicate warnings
-        # ------------------------------------------------------
-
-        return list(
-            dict.fromkeys(
-                warnings
-            )
-        )
+        return warnings
 
     # ==========================================================
     # Grade
@@ -873,19 +888,15 @@ class SignalFusionEngine:
     ) -> str:
 
         if score >= 90:
-
             return "A+"
 
         if score >= 80:
-
             return "A"
 
         if score >= 70:
-
             return "B"
 
         if score >= 60:
-
             return "C"
 
         return "D"
@@ -894,76 +905,67 @@ class SignalFusionEngine:
     # State
     # ==========================================================
 
+    @staticmethod
     def _get_state(
-        self,
         score: float,
         confluence: float,
         direction: str,
         warnings: list,
-        directional_component_count: int,
+        minimum_evidence_ok: bool,
     ) -> str:
         """
-        Determine setup state.
+        Final setup state.
 
-        TRADE_CANDIDATE requires:
-            score >= min_score
-            confluence >= min_confluence
+        TRADE_CANDIDATE:
+            score >= 70
+            confluence >= 70
             valid direction
-            enough directional evidence
+            minimum evidence
             no critical funding warning
 
-        WATCH requires:
-            score >= min_score
+        WATCH:
+            score >= 70
             confluence >= 60
+            valid direction
+            minimum evidence
 
         WEAK_SETUP:
             score >= 60
+            valid direction
 
-        Otherwise:
-            NO_CLEAR_SETUP
+        NO_CLEAR_SETUP:
+            everything else
         """
 
-        if direction == "NEUTRAL":
+        if direction not in {
+            "BULLISH",
+            "BEARISH",
+        }:
+            return "NO_CLEAR_SETUP"
 
+        if not minimum_evidence_ok:
             return "NO_CLEAR_SETUP"
 
         critical_warning = any(
-            (
-                "Extreme funding"
-                in warning
-            )
-            or (
-                "crowded positioning"
-                in warning
-            )
+            "Extreme funding"
+            in str(warning)
             for warning in warnings
         )
 
-        # Strong candidate.
-
         if (
-            score >= self.min_score
-            and confluence >= self.min_confluence
-            and directional_component_count
-            >= self.min_directional_components
+            score >= 70
+            and confluence >= 70
             and not critical_warning
         ):
-
             return "TRADE_CANDIDATE"
 
-        # Watch.
-
         if (
-            score >= self.min_score
+            score >= 70
             and confluence >= 60
         ):
-
             return "WATCH"
 
-        # Weak.
-
         if score >= 60:
-
             return "WEAK_SETUP"
 
         return "NO_CLEAR_SETUP"
@@ -993,67 +995,29 @@ class SignalFusionEngine:
             Dict[str, Any]
         ] = None,
     ) -> Dict[str, Any]:
-        """
-        Main fusion method.
 
-        AI is accepted for compatibility but does not participate
-        in the primary quantitative score.
-
-        Gemini remains an independent reviewer in ScannerEngine.
-        """
-
-        technical = (
+        technical = self._safe_dict(
             technical
-            if isinstance(
-                technical,
-                dict,
-            )
-            else {}
         )
 
-        smc = (
+        smc = self._safe_dict(
             smc
-            if isinstance(
-                smc,
-                dict,
-            )
-            else {}
         )
 
-        mtf = (
+        mtf = self._safe_dict(
             mtf
-            if isinstance(
-                mtf,
-                dict,
-            )
-            else {}
         )
 
-        derivatives = (
+        derivatives = self._safe_dict(
             derivatives
-            if isinstance(
-                derivatives,
-                dict,
-            )
-            else {}
         )
 
-        market = (
+        market = self._safe_dict(
             market
-            if isinstance(
-                market,
-                dict,
-            )
-            else {}
         )
 
-        ai = (
+        ai = self._safe_dict(
             ai
-            if isinstance(
-                ai,
-                dict,
-            )
-            else {}
         )
 
         # ======================================================
@@ -1074,102 +1038,106 @@ class SignalFusionEngine:
         # ======================================================
 
         raw_scores = {
-            "technical":
-                self._safe_score(
-                    technical
-                ),
+            "technical": self._safe_score(
+                technical
+            ),
 
-            "smc":
-                self._get_smc_score(
-                    smc,
-                    direction,
-                ),
+            "smc": self._get_smc_score(
+                smc,
+                direction,
+            ),
 
-            "mtf":
-                self._safe_score(
-                    mtf
-                ),
+            "mtf": self._safe_score(
+                mtf
+            ),
 
-            "derivatives":
-                self._safe_score(
-                    derivatives
-                ),
+            "derivatives": self._safe_score(
+                derivatives
+            ),
 
-            "market":
-                self._get_market_score(
-                    market,
-                    direction,
-                ),
+            "market": self._get_market_score(
+                market,
+                direction,
+            ),
+
+            "ai": self._safe_score(
+                ai
+            ),
         }
-
-        # AI score kept separately.
-        ai_score = self._safe_score(
-            ai
-        )
 
         # ======================================================
         # Component Directions
         # ======================================================
 
         component_directions = {
-            "technical":
-                self._direction(
-                    technical
-                ),
+            "technical": self._direction(
+                technical
+            ),
 
-            "smc":
-                self._smc_direction(
-                    smc
-                ),
+            "smc": self._smc_direction(
+                smc
+            ),
 
-            "mtf":
-                self._direction(
-                    mtf
-                ),
+            "mtf": self._direction(
+                mtf
+            ),
 
-            "derivatives":
-                self._direction(
-                    derivatives
-                ),
+            "derivatives": self._direction(
+                derivatives
+            ),
 
-            "market":
-                "NEUTRAL",
+            # Market is context only.
+            "market": "NEUTRAL",
+
+            # AI is reviewer only.
+            "ai": "NEUTRAL",
         }
 
         # ======================================================
-        # Directional Adjustments
+        # Adjusted Scores
         # ======================================================
 
-        adjusted_scores = {}
-
-        for component in (
-            "technical",
-            "smc",
-            "mtf",
-            "derivatives",
-        ):
-
-            adjusted_scores[
-                component
-            ] = self._directional_score(
-                raw_scores.get(
-                    component
-                ),
-                component_directions.get(
-                    component,
-                    "NEUTRAL",
-                ),
+        adjusted_scores = {
+            "technical": self._directional_score(
+                raw_scores["technical"],
+                component_directions[
+                    "technical"
+                ],
                 direction,
-            )
+            ),
 
-        # Market does not require directional penalty because
-        # _get_market_score already evaluates it directionally.
+            "smc": self._directional_score(
+                raw_scores["smc"],
+                component_directions[
+                    "smc"
+                ],
+                direction,
+            ),
 
-        adjusted_scores[
-            "market"
-        ] = raw_scores.get(
-            "market"
-        )
+            "mtf": self._directional_score(
+                raw_scores["mtf"],
+                component_directions[
+                    "mtf"
+                ],
+                direction,
+            ),
+
+            "derivatives": self._directional_score(
+                raw_scores["derivatives"],
+                component_directions[
+                    "derivatives"
+                ],
+                direction,
+            ),
+
+            "market": raw_scores[
+                "market"
+            ],
+
+            "ai": raw_scores[
+                "ai"
+            ],
+        }
 
         # ======================================================
         # Weighted Score
@@ -1193,22 +1161,14 @@ class SignalFusionEngine:
         )
 
         # ======================================================
-        # Directional Evidence
+        # Minimum Evidence
         # ======================================================
 
-        directional_component_count = sum(
-            1
-            for component in (
-                "technical",
-                "smc",
-                "mtf",
-                "derivatives",
+        minimum_evidence_ok = (
+            self._minimum_evidence_ok(
+                component_directions,
+                direction,
             )
-            if component_directions.get(
-                component,
-                "NEUTRAL",
-            )
-            != "NEUTRAL"
         )
 
         # ======================================================
@@ -1224,6 +1184,37 @@ class SignalFusionEngine:
                 component_scores=adjusted_scores,
                 component_directions=component_directions,
             )
+        )
+
+        # ======================================================
+        # Evidence Penalty
+        # ======================================================
+        #
+        # If only two modules are available, the weighted
+        # score is still valid, but we prevent it from looking
+        # like a fully confirmed setup.
+        #
+
+        directional_evidence = (
+            self._count_directional_evidence(
+                component_directions
+            )
+        )
+
+        if directional_evidence == 2:
+
+            weighted_score *= 0.95
+
+        elif directional_evidence == 1:
+
+            weighted_score *= 0.85
+
+        weighted_score = max(
+            0.0,
+            min(
+                100.0,
+                weighted_score,
+            ),
         )
 
         # ======================================================
@@ -1243,9 +1234,7 @@ class SignalFusionEngine:
             confluence=confluence,
             direction=direction,
             warnings=warnings,
-            directional_component_count=(
-                directional_component_count
-            ),
+            minimum_evidence_ok=minimum_evidence_ok,
         )
 
         # ======================================================
@@ -1267,27 +1256,18 @@ class SignalFusionEngine:
         ]
 
         # ======================================================
-        # Quality Flag
+        # Status
         # ======================================================
 
-        quality_pass = bool(
-            (
-                weighted_score
-                >= self.min_score
-            )
-            and (
-                direction
-                != "NEUTRAL"
-            )
-            and (
-                confluence
-                >= self.min_confluence
-            )
-            and (
-                directional_component_count
-                >= self.min_directional_components
-            )
-        )
+        if (
+            not available_components
+        ):
+
+            status = "UNAVAILABLE"
+
+        else:
+
+            status = "SUCCESS"
 
         # ======================================================
         # Result
@@ -1310,10 +1290,12 @@ class SignalFusionEngine:
                 2,
             ),
 
-            "quality_pass": quality_pass,
+            "minimum_evidence": (
+                minimum_evidence_ok
+            ),
 
-            "directional_evidence_count": (
-                directional_component_count
+            "directional_evidence": (
+                directional_evidence
             ),
 
             "components": {
@@ -1354,22 +1336,8 @@ class SignalFusionEngine:
             "warnings":
                 warnings,
 
-            # AI is informational/reviewer data only.
-            "ai": {
-                "available": (
-                    ai_score is not None
-                ),
-                "score": (
-                    round(
-                        ai_score,
-                        2,
-                    )
-                    if ai_score is not None
-                    else None
-                ),
-            },
-
-            "status": "SUCCESS",
+            "status":
+                status,
         }
 
         # ======================================================
@@ -1384,16 +1352,14 @@ class SignalFusionEngine:
                 "grade=%s | "
                 "state=%s | "
                 "confluence=%.2f%% | "
-                "directional_evidence=%s/4 | "
-                "quality_pass=%s"
+                "evidence=%s"
             ),
             direction,
             weighted_score,
             grade,
             state,
             confluence,
-            directional_component_count,
-            quality_pass,
+            directional_evidence,
         )
 
         return result
