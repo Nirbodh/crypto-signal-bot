@@ -90,7 +90,7 @@ from app.market.market_context import (
     MarketContextEngine,
 )
 
-from app..setup_validator import (
+from app.smc.setup_validator import (
     SMCSetupValidator,
 )
 
