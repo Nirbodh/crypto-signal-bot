@@ -1,7 +1,6 @@
 import logging
 from typing import Any, Dict, Optional
 
-
 logger = logging.getLogger("crypto-signal-bot")
 
 
