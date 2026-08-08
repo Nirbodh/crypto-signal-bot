@@ -15,15 +15,13 @@ class ScannerEngine:
 
         Coin Universe
               ↓
-        OHLCV
+        OHLCV 4H / 1H / 15m / 5m
               ↓
         Technical
               ↓
         SMC
               ↓
-        SMC Setup Validator
-              ↓
-        MTF
+        Multi-Timeframe
               ↓
         Derivatives
               ↓
@@ -31,31 +29,76 @@ class ScannerEngine:
               ↓
         Signal Fusion
               ↓
-        Fusion Quality Gate
+        Minimum Evidence Gate
               ↓
-        Gemini Review
+        Fusion State Gate
               ↓
-        Trade Plan
+        Gemini Review (optional)
               ↓
-        Risk Engine
+        Trade Plan (optional)
+              ↓
+        Risk Engine (optional)
               ↓
         Final Candidate
 
-    Safety principles:
+    IMPORTANT
+    ---------
+    This engine orchestrates analysis.
 
-        - Never invent analysis.
-        - Missing critical analysis cannot become a trade.
-        - Fusion state is respected.
-        - Gemini REJECT blocks the setup.
-        - Gemini CAUTION does not automatically become a trade.
-        - Trade-plan failure blocks the trade.
-        - Risk-engine failure blocks the trade.
-        - SCAN_LIMIT=0 means scan the complete universe.
+    It does NOT invent:
+        - OHLCV
+        - technical scores
+        - SMC scores
+        - MTF scores
+        - derivatives data
+        - market data
+        - AI decisions
+
+    Missing data remains missing.
+
+    The Scanner is intentionally conservative:
+        - score alone is not enough
+        - direction alone is not enough
+        - confluence matters
+        - minimum evidence matters
+        - Gemini is a reviewer, not the primary signal
+        - Risk Engine has final veto authority when configured
     """
 
-    # ==========================================================
-    # Initialization
-    # ==========================================================
+    TIMEFRAMES = (
+        "4h",
+        "1h",
+        "15m",
+        "5m",
+    )
+
+    # ----------------------------------------------------------
+    # Minimum candles requested from the data provider.
+    #
+    # MTF currently requires 120 valid candles.
+    # 350 gives enough room for EMA100 + indicator warmup.
+    # ----------------------------------------------------------
+
+    OHLCV_LIMIT = 350
+
+    # ----------------------------------------------------------
+    # Minimum evidence for a meaningful setup.
+    #
+    # Technical + SMC are the core setup engines.
+    # MTF is strongly preferred but may be PARTIAL.
+    # ----------------------------------------------------------
+
+    MIN_CORE_COMPONENTS = 2
+
+    # ----------------------------------------------------------
+    # Preferred minimum confluence.
+    #
+    # SignalFusionEngine itself determines state, but Scanner
+    # applies this as an additional safety layer.
+    # ----------------------------------------------------------
+
+    MIN_TRADE_CONFLUENCE = 70.0
+    MIN_WATCH_CONFLUENCE = 60.0
 
     def __init__(
         self,
@@ -91,22 +134,15 @@ class ScannerEngine:
 
         logger.info(
             "ScannerEngine initialized | "
-            "technical=%s | "
-            "smc=%s | "
-            "mtf=%s | "
-            "derivatives=%s | "
-            "market=%s | "
-            "validator=%s | "
-            "fusion=%s | "
-            "gemini=%s | "
-            "trade_plan=%s | "
-            "risk=%s",
+            "technical=%s | smc=%s | mtf=%s | "
+            "derivatives=%s | market=%s | "
+            "fusion=%s | gemini=%s | "
+            "trade_plan=%s | risk=%s",
             bool(self.technical_engine),
             bool(self.smc_engine),
             bool(self.mtf_engine),
             bool(self.derivatives_engine),
             bool(self.market_context_engine),
-            bool(self.setup_validator),
             bool(self.fusion_engine),
             bool(self.gemini_reviewer),
             bool(self.trade_plan_engine),
@@ -114,11 +150,13 @@ class ScannerEngine:
         )
 
     # ==========================================================
-    # Helpers
+    # Generic Helpers
     # ==========================================================
 
     @staticmethod
-    def _safe_dict(value: Any) -> Dict[str, Any]:
+    def _safe_dict(
+        value: Any,
+    ) -> Dict[str, Any]:
 
         if isinstance(value, dict):
             return value
@@ -126,63 +164,96 @@ class ScannerEngine:
         return {}
 
     @staticmethod
+    def _normalize_direction(
+        value: Any,
+    ) -> str:
+
+        direction = str(
+            value or "NEUTRAL"
+        ).upper().strip()
+
+        if direction in {
+            "BULLISH",
+            "BEARISH",
+            "NEUTRAL",
+        }:
+            return direction
+
+        if direction in {
+            "LONG",
+            "BUY",
+        }:
+            return "BULLISH"
+
+        if direction in {
+            "SHORT",
+            "SELL",
+        }:
+            return "BEARISH"
+
+        return "NEUTRAL"
+
+    @staticmethod
+    def _to_float(
+        value: Any,
+    ) -> Optional[float]:
+
+        try:
+            return float(value)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return None
+
+    @classmethod
     def _has_real_analysis(
+        cls,
         result: Dict[str, Any],
     ) -> bool:
+
+        if not isinstance(result, dict):
+            return False
 
         if not result:
             return False
 
-        if str(
-            result.get("status", "")
-        ).upper() in {
+        status = str(
+            result.get(
+                "status",
+                "",
+            )
+        ).upper()
+
+        if status in {
             "ERROR",
             "FAILED",
             "SKIPPED",
+            "UNAVAILABLE",
         }:
             return False
 
+        # MTF may return PARTIAL and still contain real data.
+        if status == "PARTIAL":
+            return True
+
         return True
 
-    @staticmethod
-    def _normalize_decision(
+    @classmethod
+    def _has_numeric_score(
+        cls,
         result: Dict[str, Any],
-    ) -> str:
+    ) -> bool:
 
-        if not isinstance(result, dict):
-            return "UNKNOWN"
+        if not cls._has_real_analysis(result):
+            return False
 
-        decision = result.get(
-            "decision",
-            result.get(
-                "verdict",
-                result.get(
-                    "status",
-                    "UNKNOWN",
-                ),
-            ),
+        return (
+            cls._to_float(
+                result.get("score")
+            )
+            is not None
         )
-
-        return str(
-            decision
-        ).upper().strip()
-
-    @staticmethod
-    def _reject_result(
-        symbol: str,
-        reason: str,
-        **kwargs,
-    ) -> Dict[str, Any]:
-
-        result = {
-            "status": "REJECTED",
-            "symbol": symbol,
-            "reason": reason,
-        }
-
-        result.update(kwargs)
-
-        return result
 
     # ==========================================================
     # Flexible Engine Invocation
@@ -239,12 +310,18 @@ class ScannerEngine:
 
             signature = None
 
+        # ------------------------------------------------------
+        # No signature available
+        # ------------------------------------------------------
+
         if signature is None:
 
             try:
 
+                result = method(context)
+
                 return self._safe_dict(
-                    method(context)
+                    result
                 )
 
             except Exception as exc:
@@ -262,20 +339,6 @@ class ScannerEngine:
             signature.parameters.values()
         )
 
-        positional_required = [
-            parameter
-            for parameter in parameters
-            if (
-                parameter.kind
-                in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                )
-                and parameter.default
-                is inspect.Parameter.empty
-            )
-        ]
-
         keyword_parameters = {
             parameter.name: parameter
             for parameter in parameters
@@ -292,6 +355,7 @@ class ScannerEngine:
                 "pair",
                 "asset",
             ],
+
             "df": [
                 "df",
                 "dataframe",
@@ -299,40 +363,52 @@ class ScannerEngine:
                 "candles",
                 "price_data",
             ],
+
             "data": [
                 "data",
                 "context",
                 "market_data",
                 "analysis_data",
             ],
+
             "technical": [
                 "technical",
                 "technical_result",
                 "technical_analysis",
             ],
+
             "smc": [
                 "smc",
                 "smc_result",
                 "smc_analysis",
             ],
+
             "mtf": [
                 "mtf",
                 "mtf_result",
                 "mtf_analysis",
             ],
+
             "derivatives": [
                 "derivatives",
                 "derivatives_result",
                 "derivatives_analysis",
             ],
+
             "market": [
                 "market",
                 "market_result",
                 "market_context",
             ],
+
+            "timeframe_data": [
+                "timeframe_data",
+                "timeframes",
+                "multi_timeframe_data",
+            ],
         }
 
-        kwargs: Dict[str, Any] = {}
+        kwargs = {}
 
         for context_key, names in aliases.items():
 
@@ -364,6 +440,10 @@ class ScannerEngine:
                     value,
                 )
 
+        # ------------------------------------------------------
+        # Keyword invocation
+        # ------------------------------------------------------
+
         if kwargs:
 
             try:
@@ -378,8 +458,8 @@ class ScannerEngine:
 
             except TypeError as exc:
 
-                logger.warning(
-                    "⚠️ %s keyword invocation incompatible | "
+                logger.debug(
+                    "%s keyword invocation incompatible | "
                     "method=%s | %s",
                     stage_name,
                     method_name,
@@ -397,10 +477,30 @@ class ScannerEngine:
 
                 return {}
 
+        # ------------------------------------------------------
+        # Single required argument fallback
+        # ------------------------------------------------------
+
+        positional_required = [
+            parameter
+            for parameter in parameters
+            if (
+                parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+                and parameter.default
+                is inspect.Parameter.empty
+            )
+        ]
+
         if len(positional_required) == 1:
 
             parameter_name = (
-                positional_required[0].name.lower()
+                positional_required[0]
+                .name
+                .lower()
             )
 
             if parameter_name in {
@@ -425,14 +525,28 @@ class ScannerEngine:
                     "symbol"
                 )
 
+            elif parameter_name in {
+                "timeframe_data",
+                "timeframes",
+            }:
+
+                argument = context.get(
+                    "timeframe_data",
+                    {},
+                )
+
             else:
 
                 argument = context
 
             try:
 
+                result = method(
+                    argument
+                )
+
                 return self._safe_dict(
-                    method(argument)
+                    result
                 )
 
             except Exception as exc:
@@ -455,33 +569,360 @@ class ScannerEngine:
         return {}
 
     # ==========================================================
-    # SMC Setup Validation
+    # OHLCV Fetch
     # ==========================================================
 
-    def _validate_smc_setup(
+    def _fetch_timeframe(
         self,
         symbol: str,
-        df: Any,
+        timeframe: str,
+        limit: int = OHLCV_LIMIT,
+    ):
+
+        if self.ohlcv_fetcher is None:
+
+            logger.error(
+                "OHLCV fetcher is not configured"
+            )
+
+            return None
+
+        try:
+
+            fetch_method = getattr(
+                self.ohlcv_fetcher,
+                "fetch",
+                None,
+            )
+
+            if not callable(
+                fetch_method
+            ):
+
+                # Compatibility with alternative fetcher names.
+                for name in (
+                    "fetch_ohlcv",
+                    "get_ohlcv",
+                    "get_candles",
+                ):
+
+                    candidate = getattr(
+                        self.ohlcv_fetcher,
+                        name,
+                        None,
+                    )
+
+                    if callable(candidate):
+
+                        fetch_method = candidate
+                        break
+
+            if not callable(
+                fetch_method
+            ):
+
+                logger.error(
+                    "OHLCV fetcher has no supported fetch method"
+                )
+
+                return None
+
+            signature = inspect.signature(
+                fetch_method
+            )
+
+            parameters = signature.parameters
+
+            kwargs = {}
+
+            # --------------------------------------------------
+            # Symbol
+            # --------------------------------------------------
+
+            if "symbol" in parameters:
+
+                kwargs["symbol"] = symbol
+
+            elif "pair" in parameters:
+
+                kwargs["pair"] = symbol
+
+            elif "asset" in parameters:
+
+                kwargs["asset"] = symbol
+
+            # --------------------------------------------------
+            # Timeframe
+            # --------------------------------------------------
+
+            if "timeframe" in parameters:
+
+                kwargs["timeframe"] = timeframe
+
+            elif "tf" in parameters:
+
+                kwargs["tf"] = timeframe
+
+            elif "interval" in parameters:
+
+                kwargs["interval"] = timeframe
+
+            # --------------------------------------------------
+            # Limit
+            # --------------------------------------------------
+
+            if "limit" in parameters:
+
+                kwargs["limit"] = limit
+
+            elif "candles" in parameters:
+
+                kwargs["candles"] = limit
+
+            elif "count" in parameters:
+
+                kwargs["count"] = limit
+
+            # --------------------------------------------------
+            # Execute
+            # --------------------------------------------------
+
+            df = fetch_method(
+                **kwargs
+            )
+
+            return df
+
+        except TypeError:
+
+            # --------------------------------------------------
+            # Positional fallback
+            # --------------------------------------------------
+
+            try:
+
+                return fetch_method(
+                    symbol,
+                    timeframe,
+                    limit,
+                )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "OHLCV positional fetch failed | "
+                    "%s | %s | %s",
+                    symbol,
+                    timeframe,
+                    exc,
+                )
+
+                return None
+
+        except Exception as exc:
+
+            logger.warning(
+                "OHLCV fetch failed | "
+                "%s | timeframe=%s | %s",
+                symbol,
+                timeframe,
+                exc,
+            )
+
+            return None
+
+    # ==========================================================
+    # Fetch All Timeframes
+    # ==========================================================
+
+    def _fetch_all_timeframes(
+        self,
+        symbol: str,
+    ) -> Dict[str, Any]:
+
+        timeframe_data = {}
+
+        for timeframe in self.TIMEFRAMES:
+
+            df = self._fetch_timeframe(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=self.OHLCV_LIMIT,
+            )
+
+            if df is None:
+
+                logger.warning(
+                    "⚠️ Missing OHLCV | %s | %s",
+                    symbol,
+                    timeframe,
+                )
+
+                timeframe_data[
+                    timeframe
+                ] = None
+
+                continue
+
+            if getattr(
+                df,
+                "empty",
+                True,
+            ):
+
+                logger.warning(
+                    "⚠️ Empty OHLCV | %s | %s",
+                    symbol,
+                    timeframe,
+                )
+
+                timeframe_data[
+                    timeframe
+                ] = None
+
+                continue
+
+            timeframe_data[
+                timeframe
+            ] = df
+
+            logger.info(
+                "OHLCV ready | %s | %s | candles=%s",
+                symbol,
+                timeframe,
+                len(df),
+            )
+
+        return timeframe_data
+
+    # ==========================================================
+    # Minimum Evidence Gate
+    # ==========================================================
+
+    def _minimum_evidence_gate(
+        self,
         technical: Dict[str, Any],
         smc: Dict[str, Any],
         mtf: Dict[str, Any],
+        derivatives: Dict[str, Any],
+        fusion: Dict[str, Any],
+    ) -> Dict[str, Any]:
+
+        core_components = []
+
+        for name, result in (
+            ("technical", technical),
+            ("smc", smc),
+            ("mtf", mtf),
+            ("derivatives", derivatives),
+        ):
+
+            if self._has_numeric_score(
+                result
+            ):
+
+                core_components.append(
+                    name
+                )
+
+        # Technical + SMC are the primary setup evidence.
+        core_setup_components = []
+
+        if self._has_numeric_score(
+            technical
+        ):
+            core_setup_components.append(
+                "technical"
+            )
+
+        if self._has_numeric_score(
+            smc
+        ):
+            core_setup_components.append(
+                "smc"
+            )
+
+        direction = self._normalize_direction(
+            fusion.get(
+                "direction",
+                "NEUTRAL",
+            )
+        )
+
+        confluence = self._to_float(
+            fusion.get(
+                "confluence"
+            )
+        )
+
+        if confluence is None:
+            confluence = 0.0
+
+        if len(core_setup_components) < self.MIN_CORE_COMPONENTS:
+
+            return {
+                "passed": False,
+                "reason": "INSUFFICIENT_CORE_EVIDENCE",
+                "core_components": core_setup_components,
+                "available_components": core_components,
+            }
+
+        if direction not in {
+            "BULLISH",
+            "BEARISH",
+        }:
+
+            return {
+                "passed": False,
+                "reason": "NO_VALID_PRIMARY_DIRECTION",
+                "core_components": core_setup_components,
+                "available_components": core_components,
+            }
+
+        if confluence < self.MIN_WATCH_CONFLUENCE:
+
+            return {
+                "passed": False,
+                "reason": "INSUFFICIENT_CONFLUENCE",
+                "confluence": confluence,
+                "required": self.MIN_WATCH_CONFLUENCE,
+                "core_components": core_setup_components,
+                "available_components": core_components,
+            }
+
+        return {
+            "passed": True,
+            "reason": "MINIMUM_EVIDENCE_CONFIRMED",
+            "core_components": core_setup_components,
+            "available_components": core_components,
+            "confluence": confluence,
+        }
+
+    # ==========================================================
+    # Optional Setup Validator
+    # ==========================================================
+
+    def _run_setup_validator(
+        self,
+        symbol: str,
+        analysis_context: Dict[str, Any],
+        fusion_result: Dict[str, Any],
     ) -> Dict[str, Any]:
 
         if self.setup_validator is None:
+
             return {
-                "status": "SKIPPED",
-                "reason": "VALIDATOR_NOT_CONFIGURED",
+                "status": "NOT_CONFIGURED",
+                "decision": "PASS",
             }
 
-        context = {
-            "symbol": symbol,
-            "df": df,
-            "dataframe": df,
-            "ohlcv": df,
-            "technical": technical,
-            "smc": smc,
-            "mtf": mtf,
-        }
+        context = dict(
+            analysis_context
+        )
+
+        context["fusion"] = fusion_result
+        context["fusion_result"] = fusion_result
+        context["symbol"] = symbol
 
         result = self._call_engine(
             engine=self.setup_validator,
@@ -489,11 +930,17 @@ class ScannerEngine:
                 "validate",
                 "evaluate",
                 "analyze",
-                "check",
             ],
             context=context,
-            stage_name="SMC Setup Validator",
+            stage_name="SetupValidator",
         )
+
+        if not result:
+
+            return {
+                "status": "UNAVAILABLE",
+                "decision": "UNKNOWN",
+            }
 
         return result
 
@@ -506,75 +953,65 @@ class ScannerEngine:
         symbol: str,
     ) -> Dict[str, Any]:
 
+        symbol = str(
+            symbol
+        ).strip().upper()
+
         logger.info(
             "🔍 Scanning %s",
             symbol,
         )
 
+        # ======================================================
+        # 1. Fetch OHLCV
+        # ======================================================
+
+        timeframe_data = (
+            self._fetch_all_timeframes(
+                symbol
+            )
+        )
+
         # ------------------------------------------------------
-        # 1. OHLCV
+        # 15m is the primary technical/SMC setup timeframe.
         # ------------------------------------------------------
 
-        try:
-
-            df = self.ohlcv_fetcher.fetch(
-                symbol=symbol,
-                timeframe="15m",
-                limit=350,
-            )
-
-        except Exception as exc:
-
-            logger.warning(
-                "OHLCV fetch failed | %s: %s",
-                symbol,
-                exc,
-            )
-
-            return self._reject_result(
-                symbol,
-                "OHLCV_FETCH_FAILED",
-                error=str(exc),
-            )
+        df = timeframe_data.get(
+            "15m"
+        )
 
         if df is None:
 
-            return self._reject_result(
-                symbol,
-                "NO_OHLCV_DATA",
-            )
-
-        if getattr(df, "empty", True):
-
-            return self._reject_result(
-                symbol,
-                "EMPTY_OHLCV",
-            )
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "NO_15M_OHLCV_DATA",
+            }
 
         if len(df) < 50:
 
-            return self._reject_result(
-                symbol,
-                "INSUFFICIENT_CANDLES",
-                candles=len(df),
-            )
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "INSUFFICIENT_15M_CANDLES",
+                "candles": len(df),
+            }
 
-        logger.info(
-            "OHLCV ready | %s | candles=%s",
-            symbol,
-            len(df),
-        )
+        # ======================================================
+        # Shared Context
+        # ======================================================
 
         analysis_context = {
             "symbol": symbol,
             "df": df,
             "dataframe": df,
             "ohlcv": df,
+            "timeframe_data": timeframe_data,
         }
 
-        # ------------------------------------------------------
+        # ======================================================
         # 2. Technical
-        # ------------------------------------------------------
+        # ======================================================
 
         technical_result = {}
 
@@ -582,10 +1019,24 @@ class ScannerEngine:
 
             try:
 
-                technical_result = self._safe_dict(
-                    self.technical_engine.analyze(
-                        df
+                technical_result = (
+                    self._safe_dict(
+                        self.technical_engine.analyze(
+                            df
+                        )
                     )
+                )
+
+                logger.info(
+                    "Technical analysis complete | %s | "
+                    "direction=%s | score=%s",
+                    symbol,
+                    technical_result.get(
+                        "direction"
+                    ),
+                    technical_result.get(
+                        "score"
+                    ),
                 )
 
             except Exception as exc:
@@ -596,13 +1047,20 @@ class ScannerEngine:
                     exc,
                 )
 
+        else:
+
+            logger.warning(
+                "⚠️ Technical engine not configured | %s",
+                symbol,
+            )
+
         analysis_context[
             "technical"
         ] = technical_result
 
-        # ------------------------------------------------------
+        # ======================================================
         # 3. SMC
-        # ------------------------------------------------------
+        # ======================================================
 
         smc_result = {}
 
@@ -610,10 +1068,24 @@ class ScannerEngine:
 
             try:
 
-                smc_result = self._safe_dict(
-                    self.smc_engine.analyze(
-                        df
+                smc_result = (
+                    self._safe_dict(
+                        self.smc_engine.analyze(
+                            df
+                        )
                     )
+                )
+
+                logger.info(
+                    "SMC analysis complete | %s | "
+                    "direction=%s",
+                    symbol,
+                    smc_result.get(
+                        "preferred_direction",
+                        smc_result.get(
+                            "direction"
+                        ),
+                    ),
                 )
 
             except Exception as exc:
@@ -624,174 +1096,301 @@ class ScannerEngine:
                     exc,
                 )
 
+        else:
+
+            logger.warning(
+                "⚠️ SMC engine not configured | %s",
+                symbol,
+            )
+
         analysis_context[
             "smc"
         ] = smc_result
 
-        # ------------------------------------------------------
-        # Safety gate
-        # ------------------------------------------------------
-
-        if not self._has_real_analysis(
-            technical_result
-        ) and not self._has_real_analysis(
-            smc_result
-        ):
-
-            return self._reject_result(
-                symbol,
-                "NO_ANALYSIS_DATA",
-            )
-
-        # ------------------------------------------------------
-        # 4. SMC Setup Validator
-        # ------------------------------------------------------
-
-        validator_result = (
-            self._validate_smc_setup(
-                symbol=symbol,
-                df=df,
-                technical=technical_result,
-                smc=smc_result,
-                mtf={},
-            )
-        )
-
-        analysis_context[
-            "setup_validation"
-        ] = validator_result
-
-        validator_decision = (
-            self._normalize_decision(
-                validator_result
-            )
-        )
-
-        if validator_decision in {
-            "REJECT",
-            "REJECTED",
-            "NO_TRADE",
-            "INVALID",
-            "BLOCK",
-            "BLOCKED",
-        }:
-
-            logger.info(
-                "❌ SMC setup validator rejected | %s",
-                symbol,
-            )
-
-            return self._reject_result(
-                symbol,
-                "SMC_SETUP_VALIDATION",
-                technical=technical_result,
-                smc=smc_result,
-                setup_validation=validator_result,
-            )
-
-        # ------------------------------------------------------
-        # 5. MTF
-        # ------------------------------------------------------
+        # ======================================================
+        # 4. Multi-Timeframe
+        #
+        # Exact contract:
+        #
+        # mtf_engine.evaluate(timeframe_data)
+        #
+        # Missing timeframe remains unavailable.
+        # ======================================================
 
         mtf_result = {}
 
         if self.mtf_engine:
 
-            mtf_result = self._call_engine(
-                engine=self.mtf_engine,
-                preferred_methods=[
+            try:
+
+                evaluate_method = getattr(
+                    self.mtf_engine,
                     "evaluate",
-                    "analyze",
-                ],
-                context=dict(
-                    analysis_context
-                ),
-                stage_name="MTF",
+                    None,
+                )
+
+                if callable(
+                    evaluate_method
+                ):
+
+                    mtf_result = (
+                        self._safe_dict(
+                            evaluate_method(
+                                timeframe_data
+                            )
+                        )
+                    )
+
+                else:
+
+                    mtf_result = (
+                        self._call_engine(
+                            engine=self.mtf_engine,
+                            preferred_methods=[
+                                "analyze",
+                                "evaluate",
+                            ],
+                            context=analysis_context,
+                            stage_name="MTF",
+                        )
+                    )
+
+                logger.info(
+                    "MTF analysis complete | %s | "
+                    "direction=%s | score=%s | "
+                    "alignment=%s | status=%s",
+                    symbol,
+                    mtf_result.get(
+                        "direction"
+                    ),
+                    mtf_result.get(
+                        "score"
+                    ),
+                    mtf_result.get(
+                        "alignment"
+                    ),
+                    mtf_result.get(
+                        "status"
+                    ),
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "MTF analysis failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+        else:
+
+            logger.warning(
+                "⚠️ MTF engine not configured | %s",
+                symbol,
             )
 
         analysis_context[
             "mtf"
         ] = mtf_result
 
-        # ------------------------------------------------------
-        # 6. Derivatives
-        # ------------------------------------------------------
+        # ======================================================
+        # 5. Derivatives
+        # ======================================================
 
         derivatives_result = {}
 
         if self.derivatives_engine:
 
-            derivatives_result = self._call_engine(
-                engine=self.derivatives_engine,
-                preferred_methods=[
-                    "analyze",
-                    "evaluate",
-                ],
-                context=dict(
-                    analysis_context
-                ),
-                stage_name="Derivatives",
+            derivatives_context = dict(
+                analysis_context
+            )
+
+            derivatives_result = (
+                self._call_engine(
+                    engine=self.derivatives_engine,
+                    preferred_methods=[
+                        "analyze",
+                        "evaluate",
+                    ],
+                    context=derivatives_context,
+                    stage_name="Derivatives",
+                )
+            )
+
+            if derivatives_result:
+
+                logger.info(
+                    "Derivatives analysis complete | %s | "
+                    "direction=%s | score=%s",
+                    symbol,
+                    derivatives_result.get(
+                        "direction"
+                    ),
+                    derivatives_result.get(
+                        "score"
+                    ),
+                )
+
+        else:
+
+            logger.warning(
+                "⚠️ Derivatives engine not configured | %s",
+                symbol,
             )
 
         analysis_context[
             "derivatives"
         ] = derivatives_result
 
-        # ------------------------------------------------------
-        # 7. Market Context
-        # ------------------------------------------------------
+        # ======================================================
+        # 6. Market Context
+        # ======================================================
 
         market_result = {}
 
         if self.market_context_engine:
 
+            market_context = dict(
+                analysis_context
+            )
+
+            market_context[
+                "symbol"
+            ] = symbol
+
+            market_result = (
+                self._call_engine(
+                    engine=self.market_context_engine,
+                    preferred_methods=[
+                        "analyze",
+                        "evaluate",
+                        "get_context",
+                    ],
+                    context=market_context,
+                    stage_name="MarketContext",
+                )
+            )
+
+        else:
+
+            logger.warning(
+                "⚠️ Market context engine not configured | %s",
+                symbol,
+            )
+
+        analysis_context[
+            "market"
+        ] = market_result
+
+        # ======================================================
+        # Safety Gate
+        # ======================================================
+
+        technical_available = (
+            self._has_real_analysis(
+                technical_result
+            )
+        )
+
+        smc_available = (
+            self._has_real_analysis(
+                smc_result
+            )
+        )
+
+        mtf_available = (
+            self._has_real_analysis(
+                mtf_result
+            )
+        )
+
+        derivatives_available = (
+            self._has_real_analysis(
+                derivatives_result
+            )
+        )
+
+        if (
+            not technical_available
+            and not smc_available
+        ):
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "NO_CORE_ANALYSIS_DATA",
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+            }
+
+        # ======================================================
+        # 7. Signal Fusion
+        # ======================================================
+
+        if self.fusion_engine is None:
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "NO_FUSION_ENGINE",
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+            }
+
+        try:
+
+            fusion_result = (
+                self._safe_dict(
+                    self.fusion_engine.evaluate(
+                        technical=technical_result,
+                        smc=smc_result,
+                        mtf=mtf_result,
+                        derivatives=derivatives_result,
+                        market=market_result,
+                        ai=None,
+                    )
+                )
+            )
+
+        except TypeError:
+
+            # Compatibility with fusion engines that do not
+            # expose the optional AI argument.
+
             try:
 
-                market_result = self._safe_dict(
-                    self.market_context_engine.analyze(
-                        symbol
+                fusion_result = (
+                    self._safe_dict(
+                        self.fusion_engine.evaluate(
+                            technical=technical_result,
+                            smc=smc_result,
+                            mtf=mtf_result,
+                            derivatives=derivatives_result,
+                            market=market_result,
+                        )
                     )
                 )
 
             except Exception as exc:
 
                 logger.exception(
-                    "Market context failed | %s: %s",
+                    "Fusion failed | %s: %s",
                     symbol,
                     exc,
                 )
 
-        analysis_context[
-            "market"
-        ] = market_result
-
-        # ------------------------------------------------------
-        # 8. Signal Fusion
-        # ------------------------------------------------------
-
-        if self.fusion_engine is None:
-
-            return self._reject_result(
-                symbol,
-                "NO_FUSION_ENGINE",
-                technical=technical_result,
-                smc=smc_result,
-                mtf=mtf_result,
-                derivatives=derivatives_result,
-                market=market_result,
-            )
-
-        try:
-
-            fusion_result = self._safe_dict(
-                self.fusion_engine.evaluate(
-                    technical=technical_result,
-                    smc=smc_result,
-                    mtf=mtf_result,
-                    derivatives=derivatives_result,
-                    market=market_result,
-                )
-            )
+                return {
+                    "status": "ERROR",
+                    "symbol": symbol,
+                    "reason": "FUSION_FAILED",
+                    "error": str(exc),
+                }
 
         except Exception as exc:
 
@@ -801,39 +1400,44 @@ class ScannerEngine:
                 exc,
             )
 
-            return self._reject_result(
-                symbol,
-                "FUSION_FAILED",
-                error=str(exc),
+            return {
+                "status": "ERROR",
+                "symbol": symbol,
+                "reason": "FUSION_FAILED",
+                "error": str(exc),
+            }
+
+        if not fusion_result:
+
+            return {
+                "status": "ERROR",
+                "symbol": symbol,
+                "reason": "EMPTY_FUSION_RESULT",
+            }
+
+        # ======================================================
+        # Fusion Summary
+        # ======================================================
+
+        score = self._to_float(
+            fusion_result.get(
+                "score"
             )
+        )
 
-        try:
-
-            score = float(
-                fusion_result.get(
-                    "score",
-                    0,
-                ) or 0
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            score = 0.0
-
-        direction = str(
+        direction = self._normalize_direction(
             fusion_result.get(
                 "direction",
                 "NEUTRAL",
             )
-        ).upper()
-
-        grade = fusion_result.get(
-            "grade",
-            "D",
         )
+
+        grade = str(
+            fusion_result.get(
+                "grade",
+                "D",
+            )
+        ).upper()
 
         state = str(
             fusion_result.get(
@@ -842,16 +1446,20 @@ class ScannerEngine:
             )
         ).upper()
 
-        confluence = float(
+        confluence = self._to_float(
             fusion_result.get(
-                "confluence",
-                0,
-            ) or 0
+                "confluence"
+            )
         )
 
+        if confluence is None:
+            confluence = 0.0
+
         logger.info(
-            "Fusion | %s | direction=%s | score=%.2f | "
-            "grade=%s | state=%s | confluence=%.2f%%",
+            "Fusion result | %s | "
+            "direction=%s | score=%s | "
+            "grade=%s | state=%s | "
+            "confluence=%.2f",
             symbol,
             direction,
             score,
@@ -860,19 +1468,105 @@ class ScannerEngine:
             confluence,
         )
 
-        # ------------------------------------------------------
-        # 9. Score Gate
-        # ------------------------------------------------------
+        # ======================================================
+        # 8. Minimum Evidence Gate
+        # ======================================================
+
+        evidence_result = (
+            self._minimum_evidence_gate(
+                technical=technical_result,
+                smc=smc_result,
+                mtf=mtf_result,
+                derivatives=derivatives_result,
+                fusion=fusion_result,
+            )
+        )
+
+        if not evidence_result.get(
+            "passed",
+            False,
+        ):
+
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+                "fusion": fusion_result,
+                "evidence": evidence_result,
+                "reason": evidence_result.get(
+                    "reason",
+                    "MINIMUM_EVIDENCE_GATE",
+                ),
+            }
+
+        # ======================================================
+        # 9. Optional Setup Validator
+        # ======================================================
+
+        validator_result = (
+            self._run_setup_validator(
+                symbol=symbol,
+                analysis_context=analysis_context,
+                fusion_result=fusion_result,
+            )
+        )
+
+        validator_decision = str(
+            validator_result.get(
+                "decision",
+                validator_result.get(
+                    "verdict",
+                    "PASS",
+                ),
+            )
+        ).upper()
+
+        if validator_decision in {
+            "REJECT",
+            "REJECTED",
+            "NO_TRADE",
+            "BLOCK",
+            "BLOCKED",
+        }:
+
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+                "fusion": fusion_result,
+                "evidence": evidence_result,
+                "validator": validator_result,
+                "reason": "SETUP_VALIDATOR",
+            }
+
+        # ======================================================
+        # 10. Quality Gate
+        # ======================================================
 
         try:
 
             minimum_score = float(
                 os.getenv(
-                    "MIN_SIGNAL_SCORE",
-                    os.getenv(
-                        "SCAN_MIN_SCORE",
-                        "70",
-                    ),
+                    "SCAN_MIN_SCORE",
+                    "70",
                 )
             )
 
@@ -883,305 +1577,488 @@ class ScannerEngine:
 
             minimum_score = 70.0
 
-        if score < minimum_score:
+        if (
+            score is None
+            or score < minimum_score
+        ):
 
-            return self._reject_result(
-                symbol,
-                "QUALITY_GATE",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-            )
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+                "fusion": fusion_result,
+                "evidence": evidence_result,
+                "validator": validator_result,
+                "reason": "QUALITY_GATE",
+            }
 
-        # ------------------------------------------------------
-        # 10. Direction Gate
-        # ------------------------------------------------------
+        # ======================================================
+        # 11. Direction Gate
+        # ======================================================
 
         if direction not in {
             "BULLISH",
             "BEARISH",
         }:
 
-            return self._reject_result(
-                symbol,
-                "NEUTRAL_DIRECTION",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-            )
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "fusion": fusion_result,
+                "reason": "INVALID_DIRECTION",
+            }
 
-        # ------------------------------------------------------
-        # 11. Fusion State Gate
-        # ------------------------------------------------------
+        # ======================================================
+        # 12. State Gate
+        #
+        # IMPORTANT:
+        #
+        # TRADE_CANDIDATE:
+        #     score >= 70
+        #     confluence >= 70
+        #
+        # WATCH:
+        #     score >= 70
+        #     confluence >= 60
+        #
+        # Scanner does not convert WEAK_SETUP into candidate.
+        # ======================================================
 
         if state not in {
             "TRADE_CANDIDATE",
             "WATCH",
         }:
 
-            return self._reject_result(
-                symbol,
-                "FUSION_STATE_REJECTED",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-            )
-
-        # ------------------------------------------------------
-        # WATCH is not a trade candidate.
-        #
-        # It can continue to Gemini only as a review,
-        # but cannot become FINAL CANDIDATE unless Gemini
-        # confirms and confluence is strong enough.
-        # ------------------------------------------------------
-
-        # ------------------------------------------------------
-        # 12. Gemini Review
-        # ------------------------------------------------------
-
-        gemini_result = {}
-
-        if self.gemini_reviewer:
-
-            review_payload = {
+            return {
+                "status": "REJECTED",
                 "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
                 "technical": technical_result,
                 "smc": smc_result,
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
-                "setup_validation": validator_result,
                 "fusion": fusion_result,
+                "evidence": evidence_result,
+                "reason": "SETUP_STATE_GATE",
             }
+
+        # ------------------------------------------------------
+        # Additional state/confluence consistency check.
+        # ------------------------------------------------------
+
+        if (
+            state == "TRADE_CANDIDATE"
+            and confluence < self.MIN_TRADE_CONFLUENCE
+        ):
+
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "fusion": fusion_result,
+                "reason": "TRADE_CONFLUENCE_GATE",
+            }
+
+        if (
+            state == "WATCH"
+            and confluence < self.MIN_WATCH_CONFLUENCE
+        ):
+
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "fusion": fusion_result,
+                "reason": "WATCH_CONFLUENCE_GATE",
+            }
+
+        # ======================================================
+        # 13. Gemini Review
+        #
+        # Gemini is optional.
+        #
+        # It reviews an existing setup.
+        # It does NOT create one.
+        # ======================================================
+
+        gemini_result = {}
+
+        if self.gemini_reviewer:
 
             try:
 
-                gemini_result = self._safe_dict(
-                    self.gemini_reviewer.review(
-                        review_payload
+                review_payload = {
+                    "symbol": symbol,
+                    "technical": technical_result,
+                    "smc": smc_result,
+                    "mtf": mtf_result,
+                    "derivatives": derivatives_result,
+                    "market": market_result,
+                    "fusion": fusion_result,
+                    "evidence": evidence_result,
+                }
+
+                review_method = getattr(
+                    self.gemini_reviewer,
+                    "review",
+                    None,
+                )
+
+                if callable(
+                    review_method
+                ):
+
+                    gemini_result = (
+                        self._safe_dict(
+                            review_method(
+                                review_payload
+                            )
+                        )
                     )
+
+                else:
+
+                    gemini_result = (
+                        self._call_engine(
+                            engine=self.gemini_reviewer,
+                            preferred_methods=[
+                                "analyze",
+                                "evaluate",
+                            ],
+                            context=review_payload,
+                            stage_name="Gemini",
+                        )
+                    )
+
+                logger.info(
+                    "🤖 Gemini review complete | %s | "
+                    "decision=%s",
+                    symbol,
+                    gemini_result.get(
+                        "decision",
+                        gemini_result.get(
+                            "verdict"
+                        ),
+                    ),
                 )
 
             except Exception as exc:
 
-                logger.exception(
+                logger.warning(
                     "Gemini review failed | %s: %s",
                     symbol,
                     exc,
                 )
 
-                return self._reject_result(
-                    symbol,
-                    "GEMINI_REVIEW_FAILED",
-                    error=str(exc),
-                    fusion=fusion_result,
-                )
+                # Gemini failure does NOT create fake approval
+                # and does NOT automatically reject the setup.
+                gemini_result = {
+                    "status": "ERROR",
+                    "decision": "UNAVAILABLE",
+                    "error": str(exc),
+                }
 
         else:
 
-            # No reviewer means no production trade approval.
             gemini_result = {
-                "status": "SKIPPED",
-                "decision": "UNKNOWN",
-                "reason": "GEMINI_NOT_CONFIGURED",
+                "status": "NOT_CONFIGURED",
+                "decision": "UNAVAILABLE",
             }
 
-        gemini_decision = (
-            self._normalize_decision(
-                gemini_result
-            )
-        )
+        # ======================================================
+        # 14. Gemini Gate
+        # ======================================================
 
-        # ------------------------------------------------------
-        # Gemini must explicitly CONFIRM
-        # ------------------------------------------------------
+        gemini_decision = str(
+            gemini_result.get(
+                "decision",
+                gemini_result.get(
+                    "verdict",
+                    "UNKNOWN",
+                ),
+            )
+        ).upper().strip()
 
         if gemini_decision in {
             "REJECT",
             "REJECTED",
             "NO_TRADE",
-        }:
-
-            return self._reject_result(
-                symbol,
-                "GEMINI_REJECTION",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-                gemini=gemini_result,
-            )
-
-        if gemini_decision != "CONFIRM":
-
-            return self._reject_result(
-                symbol,
-                "GEMINI_NOT_CONFIRMED",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-                gemini=gemini_result,
-            )
-
-        # ------------------------------------------------------
-        # 13. Final trade-quality confluence gate
-        # ------------------------------------------------------
-
-        if confluence < 70:
-
-            return self._reject_result(
-                symbol,
-                "INSUFFICIENT_CONFLUENCE",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-                gemini=gemini_result,
-            )
-
-        # ------------------------------------------------------
-        # 14. Trade Plan
-        # ------------------------------------------------------
-
-        if self.trade_plan_engine is None:
-
-            return self._reject_result(
-                symbol,
-                "TRADE_PLAN_ENGINE_UNAVAILABLE",
-                fusion=fusion_result,
-                gemini=gemini_result,
-            )
-
-        try:
-
-            trade_plan = self._safe_dict(
-                self.trade_plan_engine.build(
-                    symbol=symbol,
-                    dataframe=df,
-                    fusion_result=fusion_result,
-                    gemini_result=gemini_result,
-                )
-            )
-
-        except Exception as exc:
-
-            logger.exception(
-                "Trade plan failed | %s: %s",
-                symbol,
-                exc,
-            )
-
-            return self._reject_result(
-                symbol,
-                "TRADE_PLAN_FAILED",
-                error=str(exc),
-                fusion=fusion_result,
-                gemini=gemini_result,
-            )
-
-        if not trade_plan:
-
-            return self._reject_result(
-                symbol,
-                "EMPTY_TRADE_PLAN",
-                fusion=fusion_result,
-                gemini=gemini_result,
-            )
-
-        if str(
-            trade_plan.get(
-                "status",
-                "SUCCESS",
-            )
-        ).upper() in {
-            "ERROR",
-            "FAILED",
-            "INVALID",
-            "REJECTED",
+            "BLOCK",
             "BLOCKED",
         }:
 
-            return self._reject_result(
-                symbol,
-                "INVALID_TRADE_PLAN",
-                fusion=fusion_result,
-                gemini=gemini_result,
-                trade_plan=trade_plan,
-            )
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+                "fusion": fusion_result,
+                "evidence": evidence_result,
+                "validator": validator_result,
+                "gemini": gemini_result,
+                "reason": "GEMINI_REJECTION",
+            }
 
-        # ------------------------------------------------------
-        # 15. Risk Engine
-        # ------------------------------------------------------
+        # ======================================================
+        # 15. Trade Plan
+        # ======================================================
 
-        if self.risk_engine is None:
+        trade_plan = {}
 
-            return self._reject_result(
-                symbol,
-                "RISK_ENGINE_UNAVAILABLE",
-                fusion=fusion_result,
-                gemini=gemini_result,
-                trade_plan=trade_plan,
-            )
+        if self.trade_plan_engine:
 
-        try:
+            try:
 
-            risk_result = self._safe_dict(
-                self.risk_engine.evaluate(
-                    symbol=symbol,
-                    fusion_result=fusion_result,
-                    gemini_result=gemini_result,
-                    trade_plan=trade_plan,
+                build_method = getattr(
+                    self.trade_plan_engine,
+                    "build",
+                    None,
                 )
+
+                if callable(
+                    build_method
+                ):
+
+                    trade_plan = (
+                        self._safe_dict(
+                            build_method(
+                                symbol=symbol,
+                                dataframe=df,
+                                fusion_result=fusion_result,
+                                gemini_result=gemini_result,
+                            )
+                        )
+                    )
+
+                else:
+
+                    trade_plan = (
+                        self._call_engine(
+                            engine=self.trade_plan_engine,
+                            preferred_methods=[
+                                "create",
+                                "build",
+                                "generate",
+                                "evaluate",
+                            ],
+                            context={
+                                "symbol": symbol,
+                                "df": df,
+                                "fusion": fusion_result,
+                                "gemini": gemini_result,
+                                "technical": technical_result,
+                                "smc": smc_result,
+                                "mtf": mtf_result,
+                                "derivatives": derivatives_result,
+                                "market": market_result,
+                            },
+                            stage_name="TradePlan",
+                        )
+                    )
+
+                logger.info(
+                    "Trade plan complete | %s",
+                    symbol,
+                )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Trade plan failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+                trade_plan = {
+                    "status": "ERROR",
+                    "error": str(exc),
+                }
+
+        else:
+
+            trade_plan = {
+                "status": "NOT_CONFIGURED",
+            }
+
+        # ======================================================
+        # 16. Risk Engine
+        # ======================================================
+
+        risk_result = {}
+
+        if self.risk_engine:
+
+            try:
+
+                evaluate_method = getattr(
+                    self.risk_engine,
+                    "evaluate",
+                    None,
+                )
+
+                if callable(
+                    evaluate_method
+                ):
+
+                    try:
+
+                        risk_result = (
+                            self._safe_dict(
+                                evaluate_method(
+                                    symbol=symbol,
+                                    fusion_result=fusion_result,
+                                    gemini_result=gemini_result,
+                                    trade_plan=trade_plan,
+                                )
+                            )
+                        )
+
+                    except TypeError:
+
+                        risk_result = (
+                            self._call_engine(
+                                engine=self.risk_engine,
+                                preferred_methods=[
+                                    "evaluate",
+                                    "build_trade_execution_plan",
+                                    "assess",
+                                ],
+                                context={
+                                    "symbol": symbol,
+                                    "fusion": fusion_result,
+                                    "fusion_result": fusion_result,
+                                    "gemini": gemini_result,
+                                    "gemini_result": gemini_result,
+                                    "trade_plan": trade_plan,
+                                    "technical": technical_result,
+                                    "smc": smc_result,
+                                    "mtf": mtf_result,
+                                    "derivatives": derivatives_result,
+                                    "market": market_result,
+                                },
+                                stage_name="Risk",
+                            )
+                        )
+
+                else:
+
+                    risk_result = (
+                        self._call_engine(
+                            engine=self.risk_engine,
+                            preferred_methods=[
+                                "assess",
+                                "evaluate",
+                                "build_trade_execution_plan",
+                            ],
+                            context={
+                                "symbol": symbol,
+                                "fusion": fusion_result,
+                                "trade_plan": trade_plan,
+                                "gemini": gemini_result,
+                                "technical": technical_result,
+                                "smc": smc_result,
+                                "mtf": mtf_result,
+                                "derivatives": derivatives_result,
+                                "market": market_result,
+                            },
+                            stage_name="Risk",
+                        )
+                    )
+
+                logger.info(
+                    "Risk evaluation complete | %s | "
+                    "decision=%s | status=%s",
+                    symbol,
+                    risk_result.get(
+                        "decision"
+                    ),
+                    risk_result.get(
+                        "status"
+                    ),
+                )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Risk evaluation failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+                risk_result = {
+                    "status": "ERROR",
+                    "decision": "UNAVAILABLE",
+                    "error": str(exc),
+                }
+
+        else:
+
+            risk_result = {
+                "status": "NOT_CONFIGURED",
+                "decision": "UNAVAILABLE",
+            }
+
+        # ======================================================
+        # 17. Risk Gate
+        #
+        # If Risk Engine exists and explicitly rejects,
+        # it has veto authority.
+        #
+        # If Risk Engine is unavailable, Scanner does not
+        # manufacture an approval.
+        # ======================================================
+
+        risk_decision = str(
+            risk_result.get(
+                "decision",
+                risk_result.get(
+                    "verdict",
+                    "",
+                ),
             )
+        ).upper().strip()
 
-        except Exception as exc:
-
-            logger.exception(
-                "Risk evaluation failed | %s: %s",
-                symbol,
-                exc,
+        risk_status = str(
+            risk_result.get(
+                "status",
+                "",
             )
-
-            return self._reject_result(
-                symbol,
-                "RISK_ENGINE_FAILED",
-                error=str(exc),
-                fusion=fusion_result,
-                gemini=gemini_result,
-                trade_plan=trade_plan,
-            )
-
-        if not risk_result:
-
-            return self._reject_result(
-                symbol,
-                "EMPTY_RISK_RESULT",
-                fusion=fusion_result,
-                gemini=gemini_result,
-                trade_plan=trade_plan,
-            )
-
-        risk_decision = (
-            self._normalize_decision(
-                risk_result
-            )
-        )
+        ).upper().strip()
 
         if risk_decision in {
             "REJECT",
@@ -1192,57 +2069,69 @@ class ScannerEngine:
             "INVALID",
         }:
 
-            return self._reject_result(
-                symbol,
-                "RISK_ENGINE",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-                gemini=gemini_result,
-                trade_plan=trade_plan,
-                risk=risk_result,
-            )
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+                "fusion": fusion_result,
+                "evidence": evidence_result,
+                "validator": validator_result,
+                "gemini": gemini_result,
+                "trade_plan": trade_plan,
+                "risk": risk_result,
+                "reason": "RISK_ENGINE",
+            }
 
-        # ------------------------------------------------------
-        # Risk engine must explicitly approve.
-        # ------------------------------------------------------
-
-        if risk_decision not in {
-            "APPROVE",
-            "APPROVED",
-            "PASS",
-            "PASSED",
-            "SUCCESS",
+        if risk_status in {
+            "ERROR",
+            "FAILED",
         }:
 
-            return self._reject_result(
-                symbol,
-                "RISK_NOT_EXPLICITLY_APPROVED",
-                score=score,
-                direction=direction,
-                grade=grade,
-                state=state,
-                confluence=confluence,
-                fusion=fusion_result,
-                gemini=gemini_result,
-                trade_plan=trade_plan,
-                risk=risk_result,
-            )
+            # Do not claim a risk-approved trade when the risk
+            # engine failed.
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "confluence": confluence,
+                "technical": technical_result,
+                "smc": smc_result,
+                "mtf": mtf_result,
+                "derivatives": derivatives_result,
+                "market": market_result,
+                "fusion": fusion_result,
+                "evidence": evidence_result,
+                "validator": validator_result,
+                "gemini": gemini_result,
+                "trade_plan": trade_plan,
+                "risk": risk_result,
+                "reason": "RISK_ENGINE_UNAVAILABLE",
+            }
 
-        # ------------------------------------------------------
-        # 16. FINAL CANDIDATE
-        # ------------------------------------------------------
+        # ======================================================
+        # 18. Final Candidate
+        # ======================================================
 
         logger.info(
-            "🎯 FINAL CANDIDATE | %s | "
-            "score=%.2f | direction=%s | "
-            "confluence=%.2f%%",
+            "🎯 CANDIDATE | %s | "
+            "score=%s | direction=%s | "
+            "state=%s | confluence=%.2f",
             symbol,
             score,
             direction,
+            state,
             confluence,
         )
 
@@ -1254,16 +2143,33 @@ class ScannerEngine:
             "grade": grade,
             "state": state,
             "confluence": confluence,
+
             "technical": technical_result,
             "smc": smc_result,
-            "setup_validation": validator_result,
             "mtf": mtf_result,
             "derivatives": derivatives_result,
             "market": market_result,
+
             "fusion": fusion_result,
+            "evidence": evidence_result,
+            "validator": validator_result,
+
             "gemini": gemini_result,
             "trade_plan": trade_plan,
             "risk": risk_result,
+
+            "status_detail": {
+                "technical_available": technical_available,
+                "smc_available": smc_available,
+                "mtf_available": mtf_available,
+                "derivatives_available": derivatives_available,
+                "gemini_available": bool(
+                    self.gemini_reviewer
+                ),
+                "risk_available": bool(
+                    self.risk_engine
+                ),
+            },
         }
 
     # ==========================================================
@@ -1297,27 +2203,8 @@ class ScannerEngine:
 
                 limit = 100
 
-        # ------------------------------------------------------
-        # FIX:
-        #
-        # limit = 0 means COMPLETE UNIVERSE.
-        # ------------------------------------------------------
-
-        if limit < 0:
-            limit = 0
-
-        logger.info(
-            "🎯 Scan limit: %s",
-            (
-                "FULL UNIVERSE"
-                if limit == 0
-                else limit
-            ),
-        )
-
-        # ------------------------------------------------------
-        # Build Universe
-        # ------------------------------------------------------
+        if limit < 1:
+            limit = 1
 
         try:
 
@@ -1341,14 +2228,6 @@ class ScannerEngine:
                 }
             ]
 
-        if universe is None:
-
-            logger.warning(
-                "Coin universe returned None"
-            )
-
-            return []
-
         if not universe:
 
             logger.warning(
@@ -1362,34 +2241,16 @@ class ScannerEngine:
             len(universe),
         )
 
-        # ------------------------------------------------------
-        # FIX:
-        #
-        # 0 = all coins.
-        # ------------------------------------------------------
-
-        if limit == 0:
-
-            selected_coins = universe
-
-        else:
-
-            selected_coins = universe[
-                :limit
-            ]
+        selected_coins = universe[
+            :limit
+        ]
 
         logger.info(
             "🔎 Scanning %s coins",
             len(selected_coins),
         )
 
-        results: List[
-            Dict[str, Any]
-        ] = []
-
-        # ------------------------------------------------------
-        # Scan
-        # ------------------------------------------------------
+        results = []
 
         for index, coin in enumerate(
             selected_coins,
@@ -1456,9 +2317,9 @@ class ScannerEngine:
                     }
                 )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Summary
-        # ------------------------------------------------------
+        # ======================================================
 
         candidate_count = sum(
             1
