@@ -41,6 +41,10 @@ class ScannerEngine:
         ohlcv_fetcher,
         technical_engine=None,
         smc_engine=None,
+        mtf_engine=None,
+        derivatives_engine=None,
+        market_context_engine=None,
+        setup_validator=None,
         fusion_engine=None,
         gemini_reviewer=None,
         trade_plan_engine=None,
@@ -53,6 +57,10 @@ class ScannerEngine:
 
         self.technical_engine = technical_engine
         self.smc_engine = smc_engine
+        self.mtf_engine = mtf_engine
+        self.derivatives_engine = derivatives_engine
+        self.market_context_engine = market_context_engine
+        self.setup_validator = setup_validator
         self.fusion_engine = fusion_engine
         self.gemini_reviewer = gemini_reviewer
         self.trade_plan_engine = trade_plan_engine
@@ -236,6 +244,90 @@ class ScannerEngine:
             )
 
         # ------------------------------------------------------
+        # 4. MTF Analysis (if available)
+        # ------------------------------------------------------
+
+        mtf_result: Dict[str, Any] = {}
+
+        if self.mtf_engine:
+
+            try:
+
+                mtf_result = (
+                    self.mtf_engine.evaluate({})
+                    or {}
+                )
+
+                logger.info(
+                    "MTF analysis complete | %s",
+                    symbol,
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "MTF analysis failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+        # ------------------------------------------------------
+        # 5. Derivatives Analysis (if available)
+        # ------------------------------------------------------
+
+        derivatives_result: Dict[str, Any] = {}
+
+        if self.derivatives_engine:
+
+            try:
+
+                derivatives_result = (
+                    self.derivatives_engine.analyze({})
+                    or {}
+                )
+
+                logger.info(
+                    "Derivatives analysis complete | %s",
+                    symbol,
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Derivatives analysis failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+        # ------------------------------------------------------
+        # 6. Market Context (if available)
+        # ------------------------------------------------------
+
+        market_result: Dict[str, Any] = {}
+
+        if self.market_context_engine:
+
+            try:
+
+                market_result = (
+                    self.market_context_engine.analyze(symbol)
+                    or {}
+                )
+
+                logger.info(
+                    "Market context complete | %s",
+                    symbol,
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Market context failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+        # ------------------------------------------------------
         # Safety Gate
         # ------------------------------------------------------
 
@@ -256,7 +348,7 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 4. Signal Fusion
+        # 7. Signal Fusion
         # ------------------------------------------------------
 
         fusion_result: Dict[str, Any] = {}
@@ -269,6 +361,9 @@ class ScannerEngine:
                     self.fusion_engine.evaluate(
                         technical=technical_result,
                         smc=smc_result,
+                        mtf=mtf_result,
+                        derivatives=derivatives_result,
+                        market=market_result,
                     )
                     or {}
                 )
@@ -345,7 +440,7 @@ class ScannerEngine:
         )
 
         # ------------------------------------------------------
-        # 5. Quality Gate
+        # 8. Quality Gate
         # ------------------------------------------------------
         #
         # IMPORTANT:
@@ -404,7 +499,7 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 6. Gemini Review
+        # 9. Gemini Review
         # ------------------------------------------------------
 
         gemini_result: Dict[str, Any] = {}
@@ -418,6 +513,9 @@ class ScannerEngine:
                     "technical": technical_result,
                     "smc": smc_result,
                     "fusion": fusion_result,
+                    "mtf": mtf_result,
+                    "derivatives": derivatives_result,
+                    "market": market_result,
                 }
 
                 gemini_result = (
@@ -446,20 +544,19 @@ class ScannerEngine:
                 }
 
         # ------------------------------------------------------
-        # 7. Gemini Decision Gate
+        # 10. Gemini Decision Gate
         # ------------------------------------------------------
 
+        # Check both 'decision' and 'verdict' fields
         gemini_decision = str(
             gemini_result.get(
                 "decision",
-                "UNKNOWN",
+                gemini_result.get(
+                    "verdict",
+                    "UNKNOWN",
+                ),
             )
         ).upper()
-
-        # Gemini may not always return a decision.
-        # In that case, don't automatically reject.
-        #
-        # Final risk engine remains responsible.
 
         if gemini_decision in {
             "REJECT",
@@ -487,7 +584,7 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 8. Trade Plan
+        # 11. Trade Plan
         # ------------------------------------------------------
 
         trade_plan: Dict[str, Any] = {}
@@ -511,33 +608,6 @@ class ScannerEngine:
                     symbol,
                 )
 
-            except TypeError:
-
-                # Compatibility fallback for older
-                # TradePlanEngine implementations.
-
-                try:
-
-                    trade_plan = (
-                        self.trade_plan_engine.build(
-                            fusion_result
-                        )
-                        or {}
-                    )
-
-                except Exception as exc:
-
-                    logger.warning(
-                        "Trade plan failed | %s: %s",
-                        symbol,
-                        exc,
-                    )
-
-                    trade_plan = {
-                        "status": "ERROR",
-                        "error": str(exc),
-                    }
-
             except Exception as exc:
 
                 logger.warning(
@@ -552,7 +622,7 @@ class ScannerEngine:
                 }
 
         # ------------------------------------------------------
-        # 9. Risk Engine
+        # 12. Risk Engine
         # ------------------------------------------------------
 
         risk_result: Dict[str, Any] = {}
@@ -576,33 +646,6 @@ class ScannerEngine:
                     symbol,
                 )
 
-            except TypeError:
-
-                # Compatibility fallback for an older
-                # RiskEngine API.
-
-                try:
-
-                    risk_result = (
-                        self.risk_engine.evaluate(
-                            fusion_result
-                        )
-                        or {}
-                    )
-
-                except Exception as exc:
-
-                    logger.warning(
-                        "Risk evaluation failed | %s: %s",
-                        symbol,
-                        exc,
-                    )
-
-                    risk_result = {
-                        "status": "ERROR",
-                        "error": str(exc),
-                    }
-
             except Exception as exc:
 
                 logger.warning(
@@ -617,7 +660,7 @@ class ScannerEngine:
                 }
 
         # ------------------------------------------------------
-        # 10. Final Risk Gate
+        # 13. Final Risk Gate
         # ------------------------------------------------------
 
         risk_decision = str(
@@ -636,6 +679,7 @@ class ScannerEngine:
             "NO_TRADE",
             "BLOCK",
             "BLOCKED",
+            "INVALID",
         }:
 
             logger.info(
@@ -660,7 +704,7 @@ class ScannerEngine:
             }
 
         # ------------------------------------------------------
-        # 11. FINAL CANDIDATE
+        # 14. FINAL CANDIDATE
         # ------------------------------------------------------
 
         logger.info(
