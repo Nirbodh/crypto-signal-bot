@@ -504,10 +504,74 @@ class RiskEngine:
 
         return {
             "status": "SUCCESS",
-
+            "decision": "APPROVE",
             "position": position,
-
             "leverage": leverage,
-
             "warnings": warnings,
         }
+
+    # ==========================================================
+    # Evaluate method for scanner compatibility
+    # ==========================================================
+
+    def evaluate(
+        self,
+        symbol: Optional[str] = None,
+        fusion_result: Optional[Dict[str, Any]] = None,
+        gemini_result: Optional[Dict[str, Any]] = None,
+        trade_plan: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+
+        """
+        Evaluate risk for a potential trade.
+
+        This method is called by ScannerEngine.
+        """
+
+        # If fusion_result is provided, extract data
+        if fusion_result:
+            score = fusion_result.get("score", 0)
+            direction = fusion_result.get("direction", "NEUTRAL")
+        else:
+            score = 0
+            direction = "NEUTRAL"
+
+        # Default values if trade_plan is not available
+        entry_price = 0
+        stop_loss = 0
+
+        if trade_plan:
+            entry_price = trade_plan.get("entry", 0)
+            stop_loss = trade_plan.get("stop_loss", 0)
+
+        # Use default account balance
+        account_balance = 10000.0
+
+        # Build risk plan
+        if entry_price > 0 and stop_loss > 0:
+            plan = self.build_plan(
+                account_balance=account_balance,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                signal_score=score,
+            )
+        else:
+            plan = {
+                "status": "INVALID",
+                "decision": "REJECT",
+                "reason": "Missing entry or stop loss",
+            }
+
+        # Check if risk is acceptable
+        if plan.get("status") == "SUCCESS":
+            # Check if stop distance is reasonable
+            stop_distance = plan.get("position", {}).get("stop_distance_percent", 0)
+            if stop_distance > 10:
+                plan["decision"] = "REJECT"
+                plan["reason"] = "Stop distance too wide"
+            else:
+                plan["decision"] = "APPROVE"
+        else:
+            plan["decision"] = "REJECT"
+
+        return plan
