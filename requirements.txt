@@ -7,3 +7,5 @@ ta
 ccxt
 google-genai
 schedule
+flask
+gunicorn
