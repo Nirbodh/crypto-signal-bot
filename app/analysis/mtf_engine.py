@@ -9,7 +9,7 @@ logger = logging.getLogger("crypto-signal-bot")
 
 class MultiTimeframeEngine:
     """
-    Multi-Timeframe Analysis Engine.
+    Production Multi-Timeframe Analysis Engine.
 
     Timeframes:
         4H  -> Macro trend
@@ -18,16 +18,46 @@ class MultiTimeframeEngine:
         5m  -> Entry timing
 
     This engine does NOT generate the final trading signal.
-    It produces directional alignment and confidence evidence.
+
+    It evaluates:
+        - EMA structure
+        - RSI
+        - MACD
+        - Momentum
+        - Directional alignment
+        - Higher timeframe agreement
+        - Entry timing
+
+    IMPORTANT:
+        This engine requires REAL OHLCV data for each timeframe.
+
+        Expected input:
+
+        {
+            "4h": DataFrame,
+            "1h": DataFrame,
+            "15m": DataFrame,
+            "5m": DataFrame
+        }
+
+        Missing timeframe data is marked UNKNOWN.
+        No fake/default market data is created.
     """
 
+    # ==========================================================
+    # Initialization
+    # ==========================================================
+
     def __init__(self):
+
         self.weights = {
             "4h": 0.35,
             "1h": 0.30,
             "15m": 0.20,
             "5m": 0.15,
         }
+
+        self.required_candles = 120
 
     # ==========================================================
     # Helpers
@@ -36,9 +66,19 @@ class MultiTimeframeEngine:
     @staticmethod
     def _validate_df(
         df: Optional[pd.DataFrame],
+        minimum_candles: int = 120,
     ) -> bool:
 
-        if df is None or df.empty:
+        if df is None:
+            return False
+
+        if not isinstance(
+            df,
+            pd.DataFrame,
+        ):
+            return False
+
+        if df.empty:
             return False
 
         required = {
@@ -49,9 +89,31 @@ class MultiTimeframeEngine:
             "volume",
         }
 
-        return required.issubset(
+        if not required.issubset(
             df.columns
-        )
+        ):
+            return False
+
+        if len(df) < minimum_candles:
+            return False
+
+        return True
+
+    @staticmethod
+    def _unknown_result(
+        reason: str,
+    ) -> Dict[str, Any]:
+
+        return {
+            "status": "UNAVAILABLE",
+            "direction": "UNKNOWN",
+            "score": 0.0,
+            "confidence": 0.0,
+            "bullish_points": 0,
+            "bearish_points": 0,
+            "evidence": [],
+            "reason": reason,
+        }
 
     # ==========================================================
     # Analyze one timeframe
@@ -59,24 +121,58 @@ class MultiTimeframeEngine:
 
     def analyze_timeframe(
         self,
-        df: pd.DataFrame,
+        df: Optional[pd.DataFrame],
     ) -> Dict[str, Any]:
 
-        if not self._validate_df(df):
+        if not self._validate_df(
+            df,
+            self.required_candles,
+        ):
 
-            return {
-                "direction": "UNKNOWN",
-                "score": 0,
-                "confidence": 0,
-            }
+            return self._unknown_result(
+                "INVALID_OR_INSUFFICIENT_OHLCV"
+            )
 
         data = df.copy()
 
+        # ------------------------------------------------------
+        # Numeric cleanup
+        # ------------------------------------------------------
+
+        for column in (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ):
+
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        data = data.dropna(
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ]
+        )
+
+        if len(data) < self.required_candles:
+
+            return self._unknown_result(
+                "INSUFFICIENT_VALID_CANDLES"
+            )
+
         close = data["close"]
 
-        # ------------------------------------------------------
+        # ======================================================
         # EMA
-        # ------------------------------------------------------
+        # ======================================================
 
         ema20 = (
             close
@@ -105,21 +201,27 @@ class MultiTimeframeEngine:
             .mean()
         )
 
-        # ------------------------------------------------------
+        # ======================================================
         # RSI
-        # ------------------------------------------------------
+        # ======================================================
 
         delta = close.diff()
 
         gain = (
             delta.clip(lower=0)
-            .rolling(14)
+            .rolling(
+                14,
+                min_periods=14,
+            )
             .mean()
         )
 
         loss = (
             -delta.clip(upper=0)
-            .rolling(14)
+            .rolling(
+                14,
+                min_periods=14,
+            )
             .mean()
         )
 
@@ -136,9 +238,9 @@ class MultiTimeframeEngine:
             )
         )
 
-        # ------------------------------------------------------
+        # ======================================================
         # MACD
-        # ------------------------------------------------------
+        # ======================================================
 
         ema12 = (
             close
@@ -160,7 +262,7 @@ class MultiTimeframeEngine:
 
         macd = ema12 - ema26
 
-        signal = (
+        macd_signal = (
             macd
             .ewm(
                 span=9,
@@ -169,9 +271,9 @@ class MultiTimeframeEngine:
             .mean()
         )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Current values
-        # ------------------------------------------------------
+        # ======================================================
 
         current_close = float(
             close.iloc[-1]
@@ -189,22 +291,24 @@ class MultiTimeframeEngine:
             ema100.iloc[-1]
         )
 
-        current_rsi = float(
-            rsi.iloc[-1]
-        ) if pd.notna(
-            rsi.iloc[-1]
-        ) else 50.0
+        current_rsi = (
+            float(rsi.iloc[-1])
+            if pd.notna(
+                rsi.iloc[-1]
+            )
+            else 50.0
+        )
 
         current_macd = float(
             macd.iloc[-1]
         )
 
-        current_signal = float(
-            signal.iloc[-1]
+        current_macd_signal = float(
+            macd_signal.iloc[-1]
         )
 
         # ======================================================
-        # Direction scoring
+        # Scoring
         # ======================================================
 
         bullish_points = 0
@@ -212,7 +316,10 @@ class MultiTimeframeEngine:
 
         evidence = []
 
-        # EMA20 vs EMA50
+        # ------------------------------------------------------
+        # 1. EMA20 vs EMA50
+        # ------------------------------------------------------
+
         if current_ema20 > current_ema50:
 
             bullish_points += 20
@@ -229,7 +336,10 @@ class MultiTimeframeEngine:
                 "EMA20 below EMA50"
             )
 
-        # EMA50 vs EMA100
+        # ------------------------------------------------------
+        # 2. EMA50 vs EMA100
+        # ------------------------------------------------------
+
         if current_ema50 > current_ema100:
 
             bullish_points += 15
@@ -246,7 +356,10 @@ class MultiTimeframeEngine:
                 "EMA50 below EMA100"
             )
 
-        # Price vs EMA20
+        # ------------------------------------------------------
+        # 3. Price vs EMA20
+        # ------------------------------------------------------
+
         if current_close > current_ema20:
 
             bullish_points += 15
@@ -263,8 +376,15 @@ class MultiTimeframeEngine:
                 "Price below EMA20"
             )
 
-        # RSI
-        if current_rsi >= 55:
+        # ------------------------------------------------------
+        # 4. RSI
+        #
+        # IMPORTANT:
+        # Extremely high RSI is NOT treated as unlimited
+        # bullish confirmation.
+        # ------------------------------------------------------
+
+        if 55 <= current_rsi < 70:
 
             bullish_points += 15
 
@@ -272,12 +392,36 @@ class MultiTimeframeEngine:
                 f"RSI bullish ({current_rsi:.1f})"
             )
 
-        elif current_rsi <= 45:
+        elif 70 <= current_rsi < 80:
+
+            bullish_points += 5
+
+            evidence.append(
+                f"RSI elevated / late ({current_rsi:.1f})"
+            )
+
+        elif current_rsi >= 80:
+
+            bearish_points += 5
+
+            evidence.append(
+                f"RSI extreme overbought ({current_rsi:.1f})"
+            )
+
+        elif 30 < current_rsi <= 45:
 
             bearish_points += 15
 
             evidence.append(
                 f"RSI bearish ({current_rsi:.1f})"
+            )
+
+        elif current_rsi <= 30:
+
+            bearish_points += 5
+
+            evidence.append(
+                f"RSI extreme oversold ({current_rsi:.1f})"
             )
 
         else:
@@ -286,8 +430,11 @@ class MultiTimeframeEngine:
                 f"RSI neutral ({current_rsi:.1f})"
             )
 
-        # MACD
-        if current_macd > current_signal:
+        # ------------------------------------------------------
+        # 5. MACD
+        # ------------------------------------------------------
+
+        if current_macd > current_macd_signal:
 
             bullish_points += 15
 
@@ -303,39 +450,81 @@ class MultiTimeframeEngine:
                 "MACD bearish"
             )
 
-        # Price momentum
-        if len(close) >= 10:
+        # ------------------------------------------------------
+        # 6. Momentum
+        #
+        # Reduced from 20 to 10 to avoid allowing short-term
+        # noise to dominate the entire timeframe.
+        # ------------------------------------------------------
+
+        momentum_points = 10
+
+        if len(close) >= 11:
 
             old_price = float(
-                close.iloc[-10]
+                close.iloc[-11]
             )
 
-            if current_close > old_price:
+            if old_price > 0:
 
-                bullish_points += 20
+                momentum_pct = (
+                    (
+                        current_close
+                        - old_price
+                    )
+                    / old_price
+                ) * 100
+
+            else:
+
+                momentum_pct = 0.0
+
+            if momentum_pct > 0:
+
+                bullish_points += (
+                    momentum_points
+                )
 
                 evidence.append(
                     "Short-term momentum bullish"
                 )
 
-            elif current_close < old_price:
+            elif momentum_pct < 0:
 
-                bearish_points += 20
+                bearish_points += (
+                    momentum_points
+                )
 
                 evidence.append(
                     "Short-term momentum bearish"
                 )
+
+            else:
+
+                evidence.append(
+                    "Short-term momentum neutral"
+                )
+
+        # ======================================================
+        # Direction
+        # ======================================================
 
         total_points = (
             bullish_points
             + bearish_points
         )
 
-        if bullish_points > bearish_points:
+        if (
+            bullish_points
+            > bearish_points
+        ):
 
             direction = "BULLISH"
 
-        elif bearish_points > bullish_points:
+        elif (
+            bearish_points
+            > bullish_points
+        ):
 
             direction = "BEARISH"
 
@@ -355,12 +544,36 @@ class MultiTimeframeEngine:
 
         else:
 
-            directional_score = 0
+            directional_score = 0.0
+
+        # ------------------------------------------------------
+        # Confidence
+        #
+        # Directional dominance converted into confidence.
+        # ------------------------------------------------------
+
+        if total_points > 0:
+
+            dominance = abs(
+                bullish_points
+                - bearish_points
+            ) / total_points
+
+            confidence = dominance * 100
+
+        else:
+
+            confidence = 0.0
 
         return {
+            "status": "SUCCESS",
             "direction": direction,
             "score": round(
                 directional_score,
+                2,
+            ),
+            "confidence": round(
+                confidence,
                 2,
             ),
             "bullish_points": (
@@ -377,7 +590,9 @@ class MultiTimeframeEngine:
             "ema50": current_ema50,
             "ema100": current_ema100,
             "macd": current_macd,
-            "macd_signal": current_signal,
+            "macd_signal": (
+                current_macd_signal
+            ),
             "evidence": evidence,
         }
 
@@ -393,7 +608,28 @@ class MultiTimeframeEngine:
         ],
     ) -> Dict[str, Any]:
 
-        results = {}
+        if not isinstance(
+            timeframe_data,
+            dict,
+        ):
+
+            return {
+                "status": "ERROR",
+                "direction": "UNKNOWN",
+                "score": 0.0,
+                "reason": (
+                    "timeframe_data must be a dictionary"
+                ),
+            }
+
+        results: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
+
+        # ------------------------------------------------------
+        # Analyze all timeframes
+        # ------------------------------------------------------
 
         for timeframe in (
             "4h",
@@ -428,7 +664,7 @@ class MultiTimeframeEngine:
             ]
 
             if (
-                result["direction"]
+                result.get("direction")
                 == "UNKNOWN"
             ):
                 continue
@@ -461,20 +697,14 @@ class MultiTimeframeEngine:
             bearish_score /= valid_weight
 
         # ------------------------------------------------------
-        # Direction
+        # Overall direction
         # ------------------------------------------------------
 
-        if (
-            bullish_score
-            > bearish_score
-        ):
+        if bullish_score > bearish_score:
 
             direction = "BULLISH"
 
-        elif (
-            bearish_score
-            > bullish_score
-        ):
+        elif bearish_score > bullish_score:
 
             direction = "BEARISH"
 
@@ -483,7 +713,7 @@ class MultiTimeframeEngine:
             direction = "NEUTRAL"
 
         # ------------------------------------------------------
-        # Alignment
+        # Direction alignment
         # ------------------------------------------------------
 
         directions = []
@@ -495,13 +725,21 @@ class MultiTimeframeEngine:
             "5m",
         ):
 
-            d = results[
+            timeframe_direction = results[
                 timeframe
-            ]["direction"]
+            ].get(
+                "direction"
+            )
 
-            if d != "UNKNOWN":
+            if timeframe_direction in {
+                "BULLISH",
+                "BEARISH",
+                "NEUTRAL",
+            }:
 
-                directions.append(d)
+                directions.append(
+                    timeframe_direction
+                )
 
         if directions:
 
@@ -530,7 +768,7 @@ class MultiTimeframeEngine:
 
         else:
 
-            alignment = 0
+            alignment = 0.0
 
         # ------------------------------------------------------
         # Higher timeframe agreement
@@ -544,36 +782,56 @@ class MultiTimeframeEngine:
         higher_agreement = 0
 
         if (
-            higher_tf["direction"]
+            higher_tf.get("direction")
             == direction
         ):
 
             higher_agreement += 50
 
         if (
-            setup_tf["direction"]
+            setup_tf.get("direction")
             == direction
         ):
 
             higher_agreement += 50
+
+        # ------------------------------------------------------
+        # Tactical agreement
+        # ------------------------------------------------------
+
+        tactical_agreement = 0
+
+        if (
+            tactical_tf.get("direction")
+            == direction
+        ):
+
+            tactical_agreement = 100
 
         # ------------------------------------------------------
         # Entry timing
         # ------------------------------------------------------
 
         if (
-            entry_tf["direction"]
+            entry_tf.get("direction")
             == direction
         ):
 
             entry_timing = "ALIGNED"
 
         elif (
-            entry_tf["direction"]
+            entry_tf.get("direction")
             == "NEUTRAL"
         ):
 
             entry_timing = "NEUTRAL"
+
+        elif (
+            entry_tf.get("direction")
+            == "UNKNOWN"
+        ):
+
+            entry_timing = "UNAVAILABLE"
 
         else:
 
@@ -581,35 +839,76 @@ class MultiTimeframeEngine:
 
         # ------------------------------------------------------
         # Overall score
+        #
+        # Macro + setup are more important than entry timing.
         # ------------------------------------------------------
 
-        overall_score = (
-            (
-                max(
-                    bullish_score,
-                    bearish_score,
-                )
-                * 0.55
-            )
-            + (
-                alignment
-                * 0.25
-            )
-            + (
-                higher_agreement
-                * 0.20
-            )
+        directional_component = max(
+            bullish_score,
+            bearish_score,
         )
 
+        overall_score = (
+            directional_component * 0.55
+            + alignment * 0.20
+            + higher_agreement * 0.15
+            + tactical_agreement * 0.10
+        )
+
+        # ------------------------------------------------------
+        # Entry penalty
+        #
+        # A contrary 5m does not automatically reject the setup,
+        # but it lowers confidence because entry timing is poor.
+        # ------------------------------------------------------
+
+        if entry_timing == "CONTRARY":
+
+            overall_score *= 0.90
+
+        elif entry_timing == "UNAVAILABLE":
+
+            overall_score *= 0.95
+
         overall_score = min(
-            100,
+            100.0,
             max(
-                0,
+                0.0,
                 overall_score,
             ),
         )
 
+        # ------------------------------------------------------
+        # Valid timeframe count
+        # ------------------------------------------------------
+
+        valid_timeframes = sum(
+            1
+            for result in results.values()
+            if result.get(
+                "direction"
+            )
+            != "UNKNOWN"
+        )
+
+        if valid_timeframes == 0:
+
+            status = "UNAVAILABLE"
+
+        elif valid_timeframes < 4:
+
+            status = "PARTIAL"
+
+        else:
+
+            status = "SUCCESS"
+
+        # ------------------------------------------------------
+        # Final result
+        # ------------------------------------------------------
+
         return {
+            "status": status,
             "direction": direction,
             "score": round(
                 overall_score,
@@ -630,6 +929,12 @@ class MultiTimeframeEngine:
             "higher_tf_agreement": (
                 higher_agreement
             ),
+            "tactical_agreement": (
+                tactical_agreement
+            ),
             "entry_timing": entry_timing,
+            "valid_timeframes": (
+                valid_timeframes
+            ),
             "timeframes": results,
         }
