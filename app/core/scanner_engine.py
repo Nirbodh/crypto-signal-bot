@@ -7,21 +7,32 @@ logger = logging.getLogger("crypto-signal-bot")
 
 class ScannerEngine:
     """
-    Main orchestration layer.
+    Main orchestration layer for the Crypto Signal Bot.
 
-    Connects:
+    Workflow:
 
         Coin Universe
-        Market Data
-        Technical
-        SMC
-        Fusion
-        Gemini
-        Risk
-        Telegram
+              ↓
+        OHLCV Fetcher
+              ↓
+        Technical Analysis
+              ↓
+        SMC Analysis
+              ↓
+        Signal Fusion
+              ↓
+        Quality Gate
+              ↓
+        Gemini Review
+              ↓
+        Trade Plan
+              ↓
+        Risk Engine
+              ↓
+        Candidate / Rejection
 
-    This class controls the workflow only.
-    Individual modules keep their own logic.
+    This class orchestrates the workflow.
+    Individual modules keep their own calculation logic.
     """
 
     def __init__(
@@ -37,45 +48,33 @@ class ScannerEngine:
         telegram_bot=None,
     ):
 
-        self.coin_universe = (
-            coin_universe
-        )
+        self.coin_universe = coin_universe
+        self.ohlcv_fetcher = ohlcv_fetcher
 
-        self.ohlcv_fetcher = (
-            ohlcv_fetcher
-        )
+        self.technical_engine = technical_engine
+        self.smc_engine = smc_engine
+        self.fusion_engine = fusion_engine
+        self.gemini_reviewer = gemini_reviewer
+        self.trade_plan_engine = trade_plan_engine
+        self.risk_engine = risk_engine
+        self.telegram_bot = telegram_bot
 
-        self.technical_engine = (
-            technical_engine
+        logger.info(
+            "ScannerEngine initialized | "
+            "technical=%s | "
+            "smc=%s | "
+            "fusion=%s | "
+            "gemini=%s | "
+            "risk=%s",
+            bool(self.technical_engine),
+            bool(self.smc_engine),
+            bool(self.fusion_engine),
+            bool(self.gemini_reviewer),
+            bool(self.risk_engine),
         )
-
-        self.smc_engine = (
-            smc_engine
-        )
-
-        self.fusion_engine = (
-            fusion_engine
-        )
-
-        self.gemini_reviewer = (
-            gemini_reviewer
-        )
-
-        self.trade_plan_engine = (
-            trade_plan_engine
-        )
-
-        self.risk_engine = (
-            risk_engine
-        )
-
-        self.telegram_bot = (
-            telegram_bot
-        )
-
 
     # ==========================================================
-    # Scan one coin
+    # Scan One Symbol
     # ==========================================================
 
     def scan_symbol(
@@ -84,161 +83,610 @@ class ScannerEngine:
     ) -> Dict[str, Any]:
 
         logger.info(
-            "Scanning %s",
+            "🔍 Scanning %s",
             symbol,
         )
 
-
         # ------------------------------------------------------
-        # 1. Fetch candles
+        # 1. Fetch OHLCV
         # ------------------------------------------------------
 
-        df = (
-            self.ohlcv_fetcher.fetch(
+        try:
+
+            df = self.ohlcv_fetcher.fetch(
                 symbol=symbol,
                 timeframe="15m",
                 limit=200,
             )
-        )
 
+        except Exception as exc:
 
-        if df.empty:
+            logger.warning(
+                "OHLCV fetch failed %s: %s",
+                symbol,
+                exc,
+            )
 
             return {
                 "status": "SKIPPED",
-                "reason": (
-                    "No OHLCV data"
-                ),
+                "symbol": symbol,
+                "reason": "OHLCV_FETCH_FAILED",
+                "error": str(exc),
             }
 
+        # ------------------------------------------------------
+        # Validate OHLCV
+        # ------------------------------------------------------
+
+        if df is None:
+
+            logger.warning(
+                "OHLCV returned None | %s",
+                symbol,
+            )
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "NO_OHLCV_DATA",
+            }
+
+        if getattr(df, "empty", True):
+
+            logger.warning(
+                "OHLCV empty | %s",
+                symbol,
+            )
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "EMPTY_OHLCV",
+            }
+
+        if len(df) < 50:
+
+            logger.warning(
+                "Insufficient candles | %s | candles=%s",
+                symbol,
+                len(df),
+            )
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "INSUFFICIENT_CANDLES",
+                "candles": len(df),
+            }
+
+        logger.info(
+            "OHLCV ready | %s | candles=%s",
+            symbol,
+            len(df),
+        )
 
         # ------------------------------------------------------
-        # 2. Technical
+        # 2. Technical Analysis
         # ------------------------------------------------------
 
-        technical_result = {}
-
+        technical_result: Dict[str, Any] = {}
 
         if self.technical_engine:
 
             try:
 
                 technical_result = (
-                    self.technical_engine.analyze(
-                        df
-                    )
+                    self.technical_engine.analyze(df)
+                    or {}
+                )
+
+                logger.info(
+                    "Technical analysis complete | %s",
+                    symbol,
                 )
 
             except Exception as exc:
 
-                logger.warning(
-                    "Technical failed %s: %s",
+                logger.exception(
+                    "Technical analysis failed | %s: %s",
                     symbol,
                     exc,
                 )
 
+        else:
+
+            logger.warning(
+                "⚠️ Technical engine not configured | %s",
+                symbol,
+            )
 
         # ------------------------------------------------------
-        # 3. SMC
+        # 3. SMC Analysis
         # ------------------------------------------------------
 
-        smc_result = {}
-
+        smc_result: Dict[str, Any] = {}
 
         if self.smc_engine:
 
             try:
 
                 smc_result = (
-                    self.smc_engine.analyze(
-                        df
+                    self.smc_engine.analyze(df)
+                    or {}
+                )
+
+                logger.info(
+                    "SMC analysis complete | %s",
+                    symbol,
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "SMC analysis failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+        else:
+
+            logger.warning(
+                "⚠️ SMC engine not configured | %s",
+                symbol,
+            )
+
+        # ------------------------------------------------------
+        # Safety Gate
+        # ------------------------------------------------------
+
+        if (
+            not technical_result
+            and not smc_result
+        ):
+
+            logger.warning(
+                "No technical/SMC data available | %s",
+                symbol,
+            )
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "NO_ANALYSIS_DATA",
+            }
+
+        # ------------------------------------------------------
+        # 4. Signal Fusion
+        # ------------------------------------------------------
+
+        fusion_result: Dict[str, Any] = {}
+
+        if self.fusion_engine:
+
+            try:
+
+                fusion_result = (
+                    self.fusion_engine.evaluate(
+                        technical=technical_result,
+                        smc=smc_result,
                     )
+                    or {}
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Fusion failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+                return {
+                    "status": "ERROR",
+                    "symbol": symbol,
+                    "reason": "FUSION_FAILED",
+                    "error": str(exc),
+                    "technical": technical_result,
+                    "smc": smc_result,
+                }
+
+        else:
+
+            logger.warning(
+                "⚠️ Fusion engine not configured | %s",
+                symbol,
+            )
+
+            return {
+                "status": "SKIPPED",
+                "symbol": symbol,
+                "reason": "NO_FUSION_ENGINE",
+                "technical": technical_result,
+                "smc": smc_result,
+            }
+
+        # ------------------------------------------------------
+        # Fusion Summary
+        # ------------------------------------------------------
+
+        score = float(
+            fusion_result.get(
+                "score",
+                0,
+            ) or 0
+        )
+
+        direction = fusion_result.get(
+            "direction",
+            "NEUTRAL",
+        )
+
+        grade = fusion_result.get(
+            "grade",
+            "D",
+        )
+
+        state = fusion_result.get(
+            "state",
+            "UNKNOWN",
+        )
+
+        logger.info(
+            "Fusion result | %s | "
+            "direction=%s | "
+            "score=%.2f | "
+            "grade=%s | "
+            "state=%s",
+            symbol,
+            direction,
+            score,
+            grade,
+            state,
+        )
+
+        # ------------------------------------------------------
+        # 5. Quality Gate
+        # ------------------------------------------------------
+        #
+        # IMPORTANT:
+        # We do NOT call Gemini for weak setups.
+        #
+        # This protects API usage.
+        #
+
+        minimum_score = 70.0
+
+        if score < minimum_score:
+
+            logger.info(
+                "❌ Rejected by quality gate | "
+                "%s | score=%.2f < %.2f",
+                symbol,
+                score,
+                minimum_score,
+            )
+
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "technical": technical_result,
+                "smc": smc_result,
+                "fusion": fusion_result,
+                "reason": "QUALITY_GATE",
+            }
+
+        # ------------------------------------------------------
+        # Direction Gate
+        # ------------------------------------------------------
+
+        if direction == "NEUTRAL":
+
+            logger.info(
+                "❌ Neutral setup rejected | %s",
+                symbol,
+            )
+
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "technical": technical_result,
+                "smc": smc_result,
+                "fusion": fusion_result,
+                "reason": "NEUTRAL_DIRECTION",
+            }
+
+        # ------------------------------------------------------
+        # 6. Gemini Review
+        # ------------------------------------------------------
+
+        gemini_result: Dict[str, Any] = {}
+
+        if self.gemini_reviewer:
+
+            try:
+
+                review_payload = {
+                    "symbol": symbol,
+                    "technical": technical_result,
+                    "smc": smc_result,
+                    "fusion": fusion_result,
+                }
+
+                gemini_result = (
+                    self.gemini_reviewer.review(
+                        review_payload
+                    )
+                    or {}
+                )
+
+                logger.info(
+                    "🤖 Gemini review complete | %s",
+                    symbol,
                 )
 
             except Exception as exc:
 
                 logger.warning(
-                    "SMC failed %s: %s",
+                    "Gemini review failed | %s: %s",
                     symbol,
                     exc,
                 )
 
+                gemini_result = {
+                    "status": "ERROR",
+                    "error": str(exc),
+                }
 
         # ------------------------------------------------------
-        # 4. Fusion
+        # 7. Gemini Decision Gate
         # ------------------------------------------------------
 
-        fusion_result = {}
-
-
-        if self.fusion_engine:
-
-            fusion_result = (
-                self.fusion_engine.evaluate(
-                    technical=technical_result,
-                    smc=smc_result,
-                )
+        gemini_decision = str(
+            gemini_result.get(
+                "decision",
+                "UNKNOWN",
             )
+        ).upper()
 
+        # Gemini may not always return a decision.
+        # In that case, don't automatically reject.
+        #
+        # Final risk engine remains responsible.
 
-        # ------------------------------------------------------
-        # Minimum quality gate
-        # ------------------------------------------------------
+        if gemini_decision in {
+            "REJECT",
+            "REJECTED",
+            "NO_TRADE",
+        }:
 
-        score = fusion_result.get(
-            "score",
-            0,
-        )
-
-
-        if score < 70:
+            logger.info(
+                "❌ Gemini rejected setup | %s",
+                symbol,
+            )
 
             return {
-
                 "status": "REJECTED",
-
                 "symbol": symbol,
-
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "technical": technical_result,
+                "smc": smc_result,
                 "fusion": fusion_result,
-
+                "gemini": gemini_result,
+                "reason": "GEMINI_REJECTION",
             }
 
-
         # ------------------------------------------------------
-        # 5. Gemini review
+        # 8. Trade Plan
         # ------------------------------------------------------
 
-        gemini_result = {}
+        trade_plan: Dict[str, Any] = {}
 
+        if self.trade_plan_engine:
 
-        if self.gemini_reviewer:
+            try:
 
-            gemini_result = (
-                self.gemini_reviewer.review(
-                    fusion_result
+                trade_plan = (
+                    self.trade_plan_engine.build(
+                        symbol=symbol,
+                        dataframe=df,
+                        fusion_result=fusion_result,
+                        gemini_result=gemini_result,
+                    )
+                    or {}
                 )
+
+                logger.info(
+                    "📐 Trade plan generated | %s",
+                    symbol,
+                )
+
+            except TypeError:
+
+                # Compatibility fallback for older
+                # TradePlanEngine implementations.
+
+                try:
+
+                    trade_plan = (
+                        self.trade_plan_engine.build(
+                            fusion_result
+                        )
+                        or {}
+                    )
+
+                except Exception as exc:
+
+                    logger.warning(
+                        "Trade plan failed | %s: %s",
+                        symbol,
+                        exc,
+                    )
+
+                    trade_plan = {
+                        "status": "ERROR",
+                        "error": str(exc),
+                    }
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Trade plan failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+                trade_plan = {
+                    "status": "ERROR",
+                    "error": str(exc),
+                }
+
+        # ------------------------------------------------------
+        # 9. Risk Engine
+        # ------------------------------------------------------
+
+        risk_result: Dict[str, Any] = {}
+
+        if self.risk_engine:
+
+            try:
+
+                risk_result = (
+                    self.risk_engine.evaluate(
+                        symbol=symbol,
+                        fusion_result=fusion_result,
+                        gemini_result=gemini_result,
+                        trade_plan=trade_plan,
+                    )
+                    or {}
+                )
+
+                logger.info(
+                    "🛡️ Risk evaluation complete | %s",
+                    symbol,
+                )
+
+            except TypeError:
+
+                # Compatibility fallback for an older
+                # RiskEngine API.
+
+                try:
+
+                    risk_result = (
+                        self.risk_engine.evaluate(
+                            fusion_result
+                        )
+                        or {}
+                    )
+
+                except Exception as exc:
+
+                    logger.warning(
+                        "Risk evaluation failed | %s: %s",
+                        symbol,
+                        exc,
+                    )
+
+                    risk_result = {
+                        "status": "ERROR",
+                        "error": str(exc),
+                    }
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Risk evaluation failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+
+                risk_result = {
+                    "status": "ERROR",
+                    "error": str(exc),
+                }
+
+        # ------------------------------------------------------
+        # 10. Final Risk Gate
+        # ------------------------------------------------------
+
+        risk_decision = str(
+            risk_result.get(
+                "decision",
+                risk_result.get(
+                    "status",
+                    "UNKNOWN",
+                ),
+            )
+        ).upper()
+
+        if risk_decision in {
+            "REJECT",
+            "REJECTED",
+            "NO_TRADE",
+            "BLOCK",
+            "BLOCKED",
+        }:
+
+            logger.info(
+                "🛑 Risk engine blocked setup | %s",
+                symbol,
             )
 
+            return {
+                "status": "REJECTED",
+                "symbol": symbol,
+                "score": score,
+                "direction": direction,
+                "grade": grade,
+                "state": state,
+                "technical": technical_result,
+                "smc": smc_result,
+                "fusion": fusion_result,
+                "gemini": gemini_result,
+                "trade_plan": trade_plan,
+                "risk": risk_result,
+                "reason": "RISK_ENGINE",
+            }
 
         # ------------------------------------------------------
-        # 6. Return candidate
+        # 11. FINAL CANDIDATE
         # ------------------------------------------------------
+
+        logger.info(
+            "🎯 CANDIDATE | %s | score=%.2f | direction=%s",
+            symbol,
+            score,
+            direction,
+        )
 
         return {
-
             "status": "CANDIDATE",
-
             "symbol": symbol,
-
+            "score": score,
+            "direction": direction,
+            "grade": grade,
+            "state": state,
+            "technical": technical_result,
+            "smc": smc_result,
             "fusion": fusion_result,
-
             "gemini": gemini_result,
-
+            "trade_plan": trade_plan,
+            "risk": risk_result,
         }
 
-
     # ==========================================================
-    # Full market scan
+    # Full Market Scan
     # ==========================================================
 
     def run_scan(
@@ -246,27 +694,111 @@ class ScannerEngine:
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
 
-
         logger.info(
-            "Building coin universe"
+            "🏗️ Building coin universe"
         )
 
+        try:
 
-        universe = (
-            self.coin_universe
-            .build_universe()
-        )
+            universe = (
+                self.coin_universe
+                .build_universe()
+            )
 
+        except Exception as exc:
 
-        results = []
+            logger.exception(
+                "Coin universe build failed: %s",
+                exc,
+            )
 
-
-        for coin in universe[:limit]:
-
-            symbol = coin[
-                "symbol"
+            return [
+                {
+                    "status": "ERROR",
+                    "reason": "UNIVERSE_BUILD_FAILED",
+                    "error": str(exc),
+                }
             ]
 
+        if universe is None:
+
+            logger.warning(
+                "Coin universe returned None"
+            )
+
+            return []
+
+        if not universe:
+
+            logger.warning(
+                "Coin universe is empty"
+            )
+
+            return []
+
+        logger.info(
+            "🌎 Universe size: %s",
+            len(universe),
+        )
+
+        results: List[Dict[str, Any]] = []
+
+        # ------------------------------------------------------
+        # Scan selected coins
+        # ------------------------------------------------------
+
+        selected_coins = universe[:limit]
+
+        logger.info(
+            "🔎 Scanning %s coins",
+            len(selected_coins),
+        )
+
+        for index, coin in enumerate(
+            selected_coins,
+            start=1,
+        ):
+
+            # --------------------------------------------------
+            # Support both:
+            #
+            # {"symbol": "BTCUSDT"}
+            #
+            # and
+            #
+            # "BTCUSDT"
+            # --------------------------------------------------
+
+            if isinstance(
+                coin,
+                dict,
+            ):
+
+                symbol = coin.get(
+                    "symbol"
+                )
+
+            else:
+
+                symbol = str(
+                    coin
+                )
+
+            if not symbol:
+
+                logger.warning(
+                    "Skipping coin without symbol | index=%s",
+                    index,
+                )
+
+                continue
+
+            logger.info(
+                "📊 Progress %s/%s | %s",
+                index,
+                len(selected_coins),
+                symbol,
+            )
 
             try:
 
@@ -276,16 +808,14 @@ class ScannerEngine:
                     )
                 )
 
-
                 results.append(
                     result
                 )
 
-
             except Exception as exc:
 
                 logger.exception(
-                    "Scan failed %s",
+                    "❌ Unexpected scan failure | %s",
                     symbol,
                 )
 
@@ -297,5 +827,50 @@ class ScannerEngine:
                     }
                 )
 
+        # ------------------------------------------------------
+        # Summary
+        # ------------------------------------------------------
+
+        candidate_count = sum(
+            1
+            for item in results
+            if item.get("status")
+            == "CANDIDATE"
+        )
+
+        rejected_count = sum(
+            1
+            for item in results
+            if item.get("status")
+            == "REJECTED"
+        )
+
+        skipped_count = sum(
+            1
+            for item in results
+            if item.get("status")
+            == "SKIPPED"
+        )
+
+        error_count = sum(
+            1
+            for item in results
+            if item.get("status")
+            == "ERROR"
+        )
+
+        logger.info(
+            "📋 Scan summary | "
+            "total=%s | "
+            "candidates=%s | "
+            "rejected=%s | "
+            "skipped=%s | "
+            "errors=%s",
+            len(results),
+            candidate_count,
+            rejected_count,
+            skipped_count,
+            error_count,
+        )
 
         return results
