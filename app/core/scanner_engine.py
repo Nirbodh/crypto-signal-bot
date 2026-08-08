@@ -104,7 +104,7 @@ class ScannerEngine:
             df = self.ohlcv_fetcher.fetch(
                 symbol=symbol,
                 timeframe="15m",
-                limit=200,
+                limit=350,
             )
 
         except Exception as exc:
