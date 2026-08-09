@@ -1108,6 +1108,114 @@ class ScannerEngine:
         ] = smc_result
 
         # ======================================================
+        # 3.5 Score SMC via SetupValidator (if available)
+        #
+        # SMCEngine provides structural events (BOS, CHoCH) but
+        # does not provide a numeric score. The SetupValidator
+        # converts these events into a directional score.
+        #
+        # The score is extracted based on the technical trend:
+        #   - BULLISH → use bullish score from validator
+        #   - BEARISH → use bearish score
+        #   - NEUTRAL → fallback to raw SMC
+        # ======================================================
+
+        smc_scored = smc_result  # fallback to raw
+
+        if self.setup_validator is not None and self._has_real_analysis(smc_result):
+
+            try:
+
+                # Build context for the validator
+                validator_context = {
+                    "symbol": symbol,
+                    "smc": smc_result,
+                    "technical": technical_result,
+                    "df": df,
+                    "timeframe_data": timeframe_data,
+                    "analysis_context": analysis_context,
+                }
+
+                validator_output = self._call_engine(
+                    engine=self.setup_validator,
+                    preferred_methods=[
+                        "evaluate",
+                        "validate",
+                        "analyze",
+                    ],
+                    context=validator_context,
+                    stage_name="SMC_Validator",
+                )
+
+                if validator_output and isinstance(validator_output, dict):
+
+                    # Determine direction from technical analysis
+                    tech_direction = self._normalize_direction(
+                        technical_result.get("direction", "NEUTRAL")
+                    )
+
+                    if tech_direction == "BULLISH":
+                        scored_data = validator_output.get("bullish", {})
+                    elif tech_direction == "BEARISH":
+                        scored_data = validator_output.get("bearish", {})
+                    else:
+                        scored_data = {}
+
+                    # Build a scored SMC dictionary
+                    smc_scored = {
+                        "score": scored_data.get("score", 0.0),
+                        "direction": tech_direction,
+                        "raw_validator": validator_output,
+                        "raw_smc": smc_result,
+                        # Preserve any other useful fields
+                        "confidence": scored_data.get("confidence"),
+                        "status": "SCORED",
+                    }
+
+                    logger.info(
+                        "SMC scored via validator | %s | "
+                        "direction=%s | score=%s",
+                        symbol,
+                        tech_direction,
+                        smc_scored.get("score"),
+                    )
+
+                else:
+
+                    # Validator returned empty or invalid; keep raw SMC
+                    smc_scored = smc_result
+                    logger.warning(
+                        "SMC validator returned no usable output | %s",
+                        symbol,
+                    )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "SMC validator evaluation failed | %s: %s",
+                    symbol,
+                    exc,
+                )
+                # Fallback to raw SMC
+                smc_scored = smc_result
+
+        else:
+
+            if self.setup_validator is None:
+                logger.info(
+                    "SMC setup validator not configured | %s",
+                    symbol,
+                )
+            else:
+                logger.info(
+                    "SMC result insufficient for scoring | %s",
+                    symbol,
+                )
+
+        # Update analysis_context with the scored SMC for later use
+        analysis_context["smc_scored"] = smc_scored
+
+        # ======================================================
         # 4. Multi-Timeframe
         #
         # Exact contract:
@@ -1349,7 +1457,7 @@ class ScannerEngine:
                 self._safe_dict(
                     self.fusion_engine.evaluate(
                         technical=technical_result,
-                        smc=smc_result,
+                        smc=smc_scored,                     # <-- SMC SCORED
                         mtf=mtf_result,
                         derivatives=derivatives_result,
                         market=market_result,
@@ -1369,7 +1477,7 @@ class ScannerEngine:
                     self._safe_dict(
                         self.fusion_engine.evaluate(
                             technical=technical_result,
-                            smc=smc_result,
+                            smc=smc_scored,                 # <-- SMC SCORED
                             mtf=mtf_result,
                             derivatives=derivatives_result,
                             market=market_result,
@@ -1475,7 +1583,7 @@ class ScannerEngine:
         evidence_result = (
             self._minimum_evidence_gate(
                 technical=technical_result,
-                smc=smc_result,
+                smc=smc_scored,                     # <-- SMC SCORED
                 mtf=mtf_result,
                 derivatives=derivatives_result,
                 fusion=fusion_result,
@@ -1496,7 +1604,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED (consistency)
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -1547,7 +1655,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -1591,7 +1699,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -1652,7 +1760,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -1717,7 +1825,7 @@ class ScannerEngine:
                 review_payload = {
                     "symbol": symbol,
                     "technical": technical_result,
-                    "smc": smc_result,
+                    "smc": smc_scored,                  # <-- SMC SCORED
                     "mtf": mtf_result,
                     "derivatives": derivatives_result,
                     "market": market_result,
@@ -1823,7 +1931,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -1882,7 +1990,7 @@ class ScannerEngine:
                                 "fusion": fusion_result,
                                 "gemini": gemini_result,
                                 "technical": technical_result,
-                                "smc": smc_result,
+                                "smc": smc_scored,          # <-- SMC SCORED
                                 "mtf": mtf_result,
                                 "derivatives": derivatives_result,
                                 "market": market_result,
@@ -1966,7 +2074,7 @@ class ScannerEngine:
                                     "gemini_result": gemini_result,
                                     "trade_plan": trade_plan,
                                     "technical": technical_result,
-                                    "smc": smc_result,
+                                    "smc": smc_scored,          # <-- SMC SCORED
                                     "mtf": mtf_result,
                                     "derivatives": derivatives_result,
                                     "market": market_result,
@@ -1991,7 +2099,7 @@ class ScannerEngine:
                                 "trade_plan": trade_plan,
                                 "gemini": gemini_result,
                                 "technical": technical_result,
-                                "smc": smc_result,
+                                "smc": smc_scored,          # <-- SMC SCORED
                                 "mtf": mtf_result,
                                 "derivatives": derivatives_result,
                                 "market": market_result,
@@ -2078,7 +2186,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -2107,7 +2215,7 @@ class ScannerEngine:
                 "state": state,
                 "confluence": confluence,
                 "technical": technical_result,
-                "smc": smc_result,
+                "smc": smc_scored,                  # <-- SMC SCORED
                 "mtf": mtf_result,
                 "derivatives": derivatives_result,
                 "market": market_result,
@@ -2145,7 +2253,7 @@ class ScannerEngine:
             "confluence": confluence,
 
             "technical": technical_result,
-            "smc": smc_result,
+            "smc": smc_scored,                  # <-- SMC SCORED
             "mtf": mtf_result,
             "derivatives": derivatives_result,
             "market": market_result,
