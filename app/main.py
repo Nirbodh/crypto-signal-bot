@@ -498,25 +498,39 @@ def perform_scan():
         )
 
         # --------------------------------------------------
-        # Candidate Logging
+        # Send Signals to Telegram
         # --------------------------------------------------
-
+        
         for candidate in candidates:
 
+            symbol = candidate.get("symbol", "UNKNOWN")
+            score = candidate.get("score", 0)
+            direction = candidate.get("direction", "NEUTRAL")
+
             logger.info(
-                "⭐ Candidate: %s | "
-                "Score: %s | "
-                "Direction: %s",
-                candidate.get(
-                    "symbol"
-                ),
-                candidate.get(
-                    "score"
-                ),
-                candidate.get(
-                    "direction"
-                ),
+                "⭐ Sending Signal: %s | Score: %s | Direction: %s",
+                symbol,
+                score,
+                direction,
             )
+
+            # 🔥 FIX: Send to Telegram
+            if telegram:
+                try:
+                    telegram.send_signal(candidate)
+                    logger.info(
+                        "✅ Signal sent to Telegram: %s",
+                        symbol
+                    )
+                except Exception as e:
+                    logger.error(
+                        "❌ Failed to send signal to Telegram: %s",
+                        e
+                    )
+            else:
+                logger.warning(
+                    "⚠️ Telegram bot not initialized. Signal not sent."
+                )
 
         # --------------------------------------------------
         # Final Status
