@@ -39,7 +39,7 @@ class GeminiReviewer:
         "REJECT",
     }
 
-    DEFAULT_MODEL = "gemini-3.6-flash"
+    DEFAULT_MODEL = "gemini-1.5-flash"
 
     def __init__(
         self,
