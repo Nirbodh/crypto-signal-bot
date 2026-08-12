@@ -1110,7 +1110,8 @@ class ScannerEngine:
         # ======================================================
         # 3.5 Score SMC via SetupValidator (if available)
         #
-        # ✅ FIXED: SMC-এর নিজস্ব দিক ধরে রাখা হয়েছে।
+        # ✅ FIXED: SMC-এর নিজস্ব দিক ধরে রাখা হয়েছে এবং
+        #           ইন্ডেন্টেশন ঠিক করা হয়েছে।
         # ======================================================
 
         smc_scored = smc_result  # fallback to raw
@@ -1142,12 +1143,12 @@ class ScannerEngine:
 
                 if validator_output and isinstance(validator_output, dict):
 
-                   # Try preferred_direction, direction, then fallback to last_structure
-                   original_smc_direction = self._normalize_direction(
-                     smc_result.get("preferred_direction") or 
-                     smc_result.get("direction") or 
-                     smc_result.get("last_structure", "NEUTRAL")
-                )
+                    # Try preferred_direction, direction, then fallback to last_structure
+                    original_smc_direction = self._normalize_direction(
+                        smc_result.get("preferred_direction") or
+                        smc_result.get("direction") or
+                        smc_result.get("last_structure", "NEUTRAL")
+                    )
 
                     # যে দিকেই SMC আছে, সেই দিকের স্কোর নিই
                     if original_smc_direction == "BULLISH":
