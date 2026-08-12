@@ -1142,10 +1142,12 @@ class ScannerEngine:
 
                 if validator_output and isinstance(validator_output, dict):
 
-                    # ✅ SMC-র আসল দিক বের করি
-                    original_smc_direction = self._normalize_direction(
-                        smc_result.get("preferred_direction", smc_result.get("direction", "NEUTRAL"))
-                    )
+                   # Try preferred_direction, direction, then fallback to last_structure
+                   original_smc_direction = self._normalize_direction(
+                     smc_result.get("preferred_direction") or 
+                     smc_result.get("direction") or 
+                     smc_result.get("last_structure", "NEUTRAL")
+                )
 
                     # যে দিকেই SMC আছে, সেই দিকের স্কোর নিই
                     if original_smc_direction == "BULLISH":
