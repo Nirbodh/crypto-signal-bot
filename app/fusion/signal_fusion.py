@@ -598,7 +598,7 @@ class SignalFusionEngine:
         )
 
     # ==========================================================
-    # Confluence
+    # ✅ FIXED Confluence
     # ==========================================================
 
     def _calculate_confluence(
@@ -609,61 +609,40 @@ class SignalFusionEngine:
         """
         Calculate directional agreement.
 
-        Only:
-            Technical
-            SMC
-            MTF
-            Derivatives
+        All four directional components (Technical, SMC, MTF, Derivatives)
+        are counted as ACTIVE regardless of direction.
 
-        participate.
-
-        Neutral / Unknown modules are ignored.
+        Only BULLISH/BEARISH components contribute to alignment.
+        NEUTRAL/UNKNOWN components reduce the overall percentage
+        because they represent missing or indecisive data.
         """
 
-        if target_direction not in {
-            "BULLISH",
-            "BEARISH",
-        }:
+        if target_direction not in {"BULLISH", "BEARISH"}:
             return 0.0
 
         active = 0
         aligned = 0
 
-        for component in (
-            "technical",
-            "smc",
-            "mtf",
-            "derivatives",
-        ):
+        for component in ("technical", "smc", "mtf", "derivatives"):
 
-            component_direction = (
-                component_directions.get(
-                    component,
-                    "UNKNOWN",
-                )
-            )
+            component_direction = component_directions.get(component, "UNKNOWN")
 
-            if component_direction not in {
-                "BULLISH",
-                "BEARISH",
-            }:
-                continue
+            # Valid directional signals count toward alignment
+            if component_direction in {"BULLISH", "BEARISH"}:
+                active += 1
+                if component_direction == target_direction:
+                    aligned += 1
 
-            active += 1
+            # NEUTRAL/UNKNOWN components are still active but do NOT align
+            elif component_direction in {"NEUTRAL", "UNKNOWN"}:
+                active += 1
 
-            if (
-                component_direction
-                == target_direction
-            ):
-                aligned += 1
+            # (Ignore any other unexpected values)
 
         if active == 0:
             return 0.0
 
-        return (
-            aligned
-            / active
-        ) * 100.0
+        return (aligned / active) * 100.0
 
     # ==========================================================
     # Minimum Evidence
