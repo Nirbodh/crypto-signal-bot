@@ -1110,14 +1110,7 @@ class ScannerEngine:
         # ======================================================
         # 3.5 Score SMC via SetupValidator (if available)
         #
-        # SMCEngine provides structural events (BOS, CHoCH) but
-        # does not provide a numeric score. The SetupValidator
-        # converts these events into a directional score.
-        #
-        # The score is extracted based on the technical trend:
-        #   - BULLISH → use bullish score from validator
-        #   - BEARISH → use bearish score
-        #   - NEUTRAL → fallback to raw SMC
+        # ✅ FIXED: SMC-এর নিজস্ব দিক ধরে রাখা হয়েছে।
         # ======================================================
 
         smc_scored = smc_result  # fallback to raw
@@ -1149,14 +1142,15 @@ class ScannerEngine:
 
                 if validator_output and isinstance(validator_output, dict):
 
-                    # Determine direction from technical analysis
-                    tech_direction = self._normalize_direction(
-                        technical_result.get("direction", "NEUTRAL")
+                    # ✅ SMC-র আসল দিক বের করি
+                    original_smc_direction = self._normalize_direction(
+                        smc_result.get("preferred_direction", smc_result.get("direction", "NEUTRAL"))
                     )
 
-                    if tech_direction == "BULLISH":
+                    # যে দিকেই SMC আছে, সেই দিকের স্কোর নিই
+                    if original_smc_direction == "BULLISH":
                         scored_data = validator_output.get("bullish", {})
-                    elif tech_direction == "BEARISH":
+                    elif original_smc_direction == "BEARISH":
                         scored_data = validator_output.get("bearish", {})
                     else:
                         scored_data = {}
@@ -1164,10 +1158,9 @@ class ScannerEngine:
                     # Build a scored SMC dictionary
                     smc_scored = {
                         "score": scored_data.get("score", 0.0),
-                        "direction": tech_direction,
+                        "direction": original_smc_direction,  # <-- আসল SMC দিক
                         "raw_validator": validator_output,
                         "raw_smc": smc_result,
-                        # Preserve any other useful fields
                         "confidence": scored_data.get("confidence"),
                         "status": "SCORED",
                     }
@@ -1176,13 +1169,12 @@ class ScannerEngine:
                         "SMC scored via validator | %s | "
                         "direction=%s | score=%s",
                         symbol,
-                        tech_direction,
+                        original_smc_direction,
                         smc_scored.get("score"),
                     )
 
                 else:
 
-                    # Validator returned empty or invalid; keep raw SMC
                     smc_scored = smc_result
                     logger.warning(
                         "SMC validator returned no usable output | %s",
@@ -1196,7 +1188,6 @@ class ScannerEngine:
                     symbol,
                     exc,
                 )
-                # Fallback to raw SMC
                 smc_scored = smc_result
 
         else:
