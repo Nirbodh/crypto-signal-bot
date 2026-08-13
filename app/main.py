@@ -498,23 +498,23 @@ def perform_scan():
         )
 
         # --------------------------------------------------
-        # Send Signals to Telegram
+        # Send Signals to Telegram (One by One with 10s delay)
         # --------------------------------------------------
         
-        for candidate in candidates:
-
+        for idx, candidate in enumerate(candidates, 1):
             symbol = candidate.get("symbol", "UNKNOWN")
             score = candidate.get("score", 0)
             direction = candidate.get("direction", "NEUTRAL")
 
             logger.info(
-                "⭐ Sending Signal: %s | Score: %s | Direction: %s",
+                "⭐ Sending Signal %d/%d: %s | Score: %s | Direction: %s",
+                idx,
+                len(candidates),
                 symbol,
                 score,
                 direction,
             )
 
-            # 🔥 FIX: Send to Telegram
             if telegram:
                 try:
                     telegram.send_signal(candidate)
@@ -531,6 +531,9 @@ def perform_scan():
                 logger.warning(
                     "⚠️ Telegram bot not initialized. Signal not sent."
                 )
+
+            # 🔥 ১০ সেকেন্ড দেরি – যাতে পরবর্তী সিগন্যাল আসতে সময় লাগে
+            time.sleep(10)
 
         # --------------------------------------------------
         # Final Status
