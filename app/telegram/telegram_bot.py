@@ -1,7 +1,7 @@
 import html
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -25,6 +25,8 @@ class TelegramBot:
         GeminiReviewer
         TradePlanEngine
         RiskEngine
+
+    Supports multiple chat IDs (comma-separated) via TELEGRAM_CHAT_IDS.
     """
 
     def __init__(
@@ -39,10 +41,24 @@ class TelegramBot:
             or os.getenv("TELEGRAM_BOT_TOKEN")
         )
 
-        self.chat_id = (
-            chat_id
-            or os.getenv("TELEGRAM_CHAT_ID")
-        )
+        # ✅ Multiple chat IDs support
+        chat_ids_env = os.getenv("TELEGRAM_CHAT_IDS", "")
+        chat_id_env = os.getenv("TELEGRAM_CHAT_ID", "")
+
+        # First try TELEGRAM_CHAT_IDS (comma-separated)
+        if chat_ids_env:
+            self.chat_ids = [
+                cid.strip()
+                for cid in chat_ids_env.split(",")
+                if cid.strip()
+            ]
+        elif chat_id_env:
+            # Fallback to single TELEGRAM_CHAT_ID
+            self.chat_ids = [chat_id_env.strip()]
+        elif chat_id:
+            self.chat_ids = [chat_id]
+        else:
+            self.chat_ids = []
 
         self.timeout = max(
             3,
@@ -61,8 +77,13 @@ class TelegramBot:
     def configured(self) -> bool:
         return bool(
             self.bot_token
-            and self.chat_id
+            and self.chat_ids
         )
+
+    @property
+    def chat_id(self) -> Optional[str]:
+        """Backward compatibility for single chat ID."""
+        return self.chat_ids[0] if self.chat_ids else None
 
     # ==========================================================
     # Safe formatting helpers
@@ -126,7 +147,7 @@ class TelegramBot:
         return {}
 
     # ==========================================================
-    # Send message
+    # Send message to all chat IDs
     # ==========================================================
 
     def send_message(
@@ -155,83 +176,98 @@ class TelegramBot:
                 "reason": "Empty Telegram message",
             }
 
+        if not self.chat_ids:
+            return {
+                "status": "SKIPPED",
+                "reason": "No chat IDs configured",
+            }
+
         url = (
             f"{self.base_url}/bot"
             f"{self.bot_token}/sendMessage"
         )
 
-        payload = {
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": (
-                disable_web_page_preview
-            ),
-        }
+        results = []
+        all_success = True
 
-        try:
-
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=self.timeout,
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            if data.get("ok"):
-
-                return {
-                    "status": "SUCCESS",
-                    "message_id": (
-                        data
-                        .get("result", {})
-                        .get("message_id")
-                    ),
-                }
-
-            reason = data.get(
-                "description",
-                "Telegram API error",
-            )
-
-            logger.warning(
-                "Telegram API rejected message: %s",
-                reason,
-            )
-
-            return {
-                "status": "FAILED",
-                "reason": reason,
-            }
-
-        except requests.RequestException as exc:
-
-            logger.warning(
-                "Telegram request failed: %s",
-                exc,
-            )
-
-            return {
-                "status": "FAILED",
-                "reason": str(exc),
-            }
-
-        except ValueError as exc:
-
-            logger.warning(
-                "Telegram returned invalid JSON: %s",
-                exc,
-            )
-
-            return {
-                "status": "FAILED",
-                "reason": (
-                    "Invalid Telegram API response"
+        for chat_id in self.chat_ids:
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": (
+                    disable_web_page_preview
                 ),
             }
+
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+
+                if data.get("ok"):
+                    results.append({
+                        "chat_id": chat_id,
+                        "status": "SUCCESS",
+                        "message_id": (
+                            data
+                            .get("result", {})
+                            .get("message_id")
+                        ),
+                    })
+                else:
+                    reason = data.get(
+                        "description",
+                        "Telegram API error",
+                    )
+                    logger.warning(
+                        "Telegram API rejected message for %s: %s",
+                        chat_id,
+                        reason,
+                    )
+                    results.append({
+                        "chat_id": chat_id,
+                        "status": "FAILED",
+                        "reason": reason,
+                    })
+                    all_success = False
+
+            except requests.RequestException as exc:
+                logger.warning(
+                    "Telegram request failed for %s: %s",
+                    chat_id,
+                    exc,
+                )
+                results.append({
+                    "chat_id": chat_id,
+                    "status": "FAILED",
+                    "reason": str(exc),
+                })
+                all_success = False
+
+            except ValueError as exc:
+                logger.warning(
+                    "Telegram returned invalid JSON for %s: %s",
+                    chat_id,
+                    exc,
+                )
+                results.append({
+                    "chat_id": chat_id,
+                    "status": "FAILED",
+                    "reason": "Invalid Telegram API response",
+                })
+                all_success = False
+
+        return {
+            "status": "SUCCESS" if all_success else "PARTIAL",
+            "results": results,
+        }
 
     # ==========================================================
     # Signal formatter
