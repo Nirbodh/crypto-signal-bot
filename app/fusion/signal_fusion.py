@@ -427,7 +427,7 @@ class SignalFusionEngine:
         return score * 0.55
 
     # ==========================================================
-    # Weighted Fusion
+    # ✅ FIXED Weighted Fusion (zero scores are treated as missing)
     # ==========================================================
 
     def _calculate_weighted_score(
@@ -438,9 +438,12 @@ class SignalFusionEngine:
         ],
     ) -> float:
         """
-        Calculate weighted score using ONLY available components.
+        Calculate weighted score.
 
-        Missing components are removed from the denominator.
+        🔥 FIX: Components with score == 0 are treated as missing.
+        A zero score from a component (e.g., Derivatives with no data)
+        should not artificially reduce the overall score by adding
+        its weight to the denominator.
         """
 
         weighted_total = 0.0
@@ -448,7 +451,8 @@ class SignalFusionEngine:
 
         for component, score in component_scores.items():
 
-            if score is None:
+            # Skip missing or zero scores
+            if score is None or score == 0:
                 continue
 
             weight = float(
