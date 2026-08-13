@@ -41,10 +41,14 @@ class OHLCVFetcher:
     ) -> Optional[Any]:
 
         try:
-
+            # ✅ Binance-এর ব্লক এড়ানোর জন্য Headers যোগ করা হলো
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
             response = self.session.get(
                 url,
                 params=params,
+                headers=headers,
                 timeout=self.timeout,
             )
 
