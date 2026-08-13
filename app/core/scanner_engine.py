@@ -1725,7 +1725,7 @@ class ScannerEngine:
             }
 
         # ======================================================
-        # 12. State Gate
+        # 12. State Gate (✅ FIXED: WEAK_SETUP যোগ করা হলো)
         #
         # IMPORTANT:
         #
@@ -1737,12 +1737,14 @@ class ScannerEngine:
         #     score >= 70
         #     confluence >= 60
         #
-        # Scanner does not convert WEAK_SETUP into candidate.
+        # WEAK_SETUP:
+        #     score >= 60 (SCAN_MIN_SCORE=60 সেট করলে পাস করবে)
         # ======================================================
 
         if state not in {
             "TRADE_CANDIDATE",
             "WATCH",
+            "WEAK_SETUP",  # <-- এই লাইন যোগ করা হয়েছে
         }:
 
             return {
