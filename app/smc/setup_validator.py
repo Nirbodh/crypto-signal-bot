@@ -21,7 +21,11 @@ class SMCSetupValidator:
         + Premium / Discount
         + Price location
 
-    No single condition is a mandatory hard filter.
+    ✅ FIXED:
+        - recent_window now actually used.
+        - Mitigated FVG/OB no longer score.
+        - Structural gate added (Sweep OR BOS/CHoCH required).
+        - Setup validity flag added.
     """
 
     def __init__(
@@ -46,7 +50,17 @@ class SMCSetupValidator:
             "evidence": [],
             "warnings": [],
             "zones": [],
+            "setup_valid": False,
         }
+
+    @staticmethod
+    def _is_recent(
+        event_index: int,
+        latest_index: int,
+        window: int,
+    ) -> bool:
+        """Check if event is within recent window."""
+        return (latest_index - event_index) <= window
 
     # ==========================================================
     # Bullish setup
@@ -77,6 +91,55 @@ class SMCSetupValidator:
             {},
         )
 
+        # Get latest index for recency check
+        latest_index = smc_result.get("current_index", 0)
+        if not latest_index:
+            # Fallback: try to get from data
+            data = smc_result.get("data")
+            if data is not None and hasattr(data, 'index'):
+                latest_index = data.index[-1] if len(data) > 0 else 0
+
+        # ==========================================================
+        # 🔥 STRUCTURAL GATE: Sweep OR BOS/CHoCH required
+        # ==========================================================
+
+        has_bullish_sweep = False
+        has_bullish_structure = False
+
+        for event in recent.get(
+            "events",
+            [],
+        ):
+            # Skip if not recent
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
+
+            if (
+                event.get("type")
+                == "LIQUIDITY_SWEEP"
+                and event.get("direction")
+                == "BULLISH"
+            ):
+                has_bullish_sweep = True
+
+            if (
+                event.get("type")
+                in {"CHoCH", "BOS"}
+                and event.get("direction")
+                == "BULLISH"
+            ):
+                has_bullish_structure = True
+
+        # Gate: At least one structural event required
+        if not (has_bullish_sweep or has_bullish_structure):
+            result["warnings"].append(
+                "No recent bullish structural evidence (sweep or BOS/CHoCH)"
+            )
+            result["setup_valid"] = False
+            return result
+
+        result["setup_valid"] = True
+
         # ------------------------------------------------------
         # 1. Bullish liquidity sweep
         # ------------------------------------------------------
@@ -87,6 +150,8 @@ class SMCSetupValidator:
             "events",
             [],
         ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
 
             if (
                 event.get("type")
@@ -121,6 +186,8 @@ class SMCSetupValidator:
             "events",
             [],
         ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
 
             if (
                 event.get("type")
@@ -156,6 +223,8 @@ class SMCSetupValidator:
             "events",
             [],
         ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
 
             if (
                 event.get("type")
@@ -182,7 +251,7 @@ class SMCSetupValidator:
             )
 
         # ------------------------------------------------------
-        # 4. Bullish FVG
+        # 4. Bullish FVG (only if not mitigated)
         # ------------------------------------------------------
 
         bullish_fvgs = [
@@ -191,8 +260,11 @@ class SMCSetupValidator:
                 "fvg",
                 [],
             )
-            if gap.get("direction")
-            == "BULLISH"
+            if (
+                gap.get("direction") == "BULLISH"
+                and self._is_recent(gap.get("index", 0), latest_index, self.recent_window)
+                and gap.get("mitigated", False) is False
+            )
         ]
 
         if bullish_fvgs:
@@ -200,7 +272,7 @@ class SMCSetupValidator:
             score += 15
 
             evidence.append(
-                "Bullish FVG available"
+                "Active bullish FVG available"
             )
 
             for gap in bullish_fvgs[-3:]:
@@ -220,11 +292,11 @@ class SMCSetupValidator:
         else:
 
             warnings.append(
-                "No recent bullish FVG"
+                "No recent active bullish FVG"
             )
 
         # ------------------------------------------------------
-        # 5. Bullish Order Block
+        # 5. Bullish Order Block (only if not mitigated)
         # ------------------------------------------------------
 
         bullish_obs = [
@@ -233,8 +305,11 @@ class SMCSetupValidator:
                 "order_blocks",
                 [],
             )
-            if block.get("direction")
-            == "BULLISH"
+            if (
+                block.get("direction") == "BULLISH"
+                and self._is_recent(block.get("index", 0), latest_index, self.recent_window)
+                and block.get("mitigated", False) is False
+            )
         ]
 
         if bullish_obs:
@@ -242,7 +317,7 @@ class SMCSetupValidator:
             score += 15
 
             evidence.append(
-                "Bullish order block available"
+                "Active bullish order block available"
             )
 
             for block in bullish_obs[-3:]:
@@ -261,7 +336,7 @@ class SMCSetupValidator:
         else:
 
             warnings.append(
-                "No recent bullish order block"
+                "No recent active bullish order block"
             )
 
         # ------------------------------------------------------
@@ -327,6 +402,11 @@ class SMCSetupValidator:
 
             result["grade"] = "NO_SETUP"
 
+        # If setup is invalid, score is 0 regardless
+        if not result["setup_valid"]:
+            result["score"] = 0
+            result["grade"] = "NO_SETUP"
+
         return result
 
     # ==========================================================
@@ -358,6 +438,53 @@ class SMCSetupValidator:
             {},
         )
 
+        # Get latest index for recency check
+        latest_index = smc_result.get("current_index", 0)
+        if not latest_index:
+            data = smc_result.get("data")
+            if data is not None and hasattr(data, 'index'):
+                latest_index = data.index[-1] if len(data) > 0 else 0
+
+        # ==========================================================
+        # 🔥 STRUCTURAL GATE: Sweep OR BOS/CHoCH required
+        # ==========================================================
+
+        has_bearish_sweep = False
+        has_bearish_structure = False
+
+        for event in recent.get(
+            "events",
+            [],
+        ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
+
+            if (
+                event.get("type")
+                == "LIQUIDITY_SWEEP"
+                and event.get("direction")
+                == "BEARISH"
+            ):
+                has_bearish_sweep = True
+
+            if (
+                event.get("type")
+                in {"CHoCH", "BOS"}
+                and event.get("direction")
+                == "BEARISH"
+            ):
+                has_bearish_structure = True
+
+        # Gate: At least one structural event required
+        if not (has_bearish_sweep or has_bearish_structure):
+            result["warnings"].append(
+                "No recent bearish structural evidence (sweep or BOS/CHoCH)"
+            )
+            result["setup_valid"] = False
+            return result
+
+        result["setup_valid"] = True
+
         # ------------------------------------------------------
         # 1. Bearish liquidity sweep
         # ------------------------------------------------------
@@ -368,6 +495,8 @@ class SMCSetupValidator:
             "events",
             [],
         ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
 
             if (
                 event.get("type")
@@ -403,6 +532,8 @@ class SMCSetupValidator:
             "events",
             [],
         ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
 
             if (
                 event.get("type")
@@ -438,6 +569,8 @@ class SMCSetupValidator:
             "events",
             [],
         ):
+            if not self._is_recent(event.get("index", 0), latest_index, self.recent_window):
+                continue
 
             if (
                 event.get("type")
@@ -464,7 +597,7 @@ class SMCSetupValidator:
             )
 
         # ------------------------------------------------------
-        # 4. Bearish FVG
+        # 4. Bearish FVG (only if not mitigated)
         # ------------------------------------------------------
 
         bearish_fvgs = [
@@ -473,8 +606,11 @@ class SMCSetupValidator:
                 "fvg",
                 [],
             )
-            if gap.get("direction")
-            == "BEARISH"
+            if (
+                gap.get("direction") == "BEARISH"
+                and self._is_recent(gap.get("index", 0), latest_index, self.recent_window)
+                and gap.get("mitigated", False) is False
+            )
         ]
 
         if bearish_fvgs:
@@ -482,7 +618,7 @@ class SMCSetupValidator:
             score += 15
 
             evidence.append(
-                "Bearish FVG available"
+                "Active bearish FVG available"
             )
 
             for gap in bearish_fvgs[-3:]:
@@ -502,11 +638,11 @@ class SMCSetupValidator:
         else:
 
             warnings.append(
-                "No recent bearish FVG"
+                "No recent active bearish FVG"
             )
 
         # ------------------------------------------------------
-        # 5. Bearish Order Block
+        # 5. Bearish Order Block (only if not mitigated)
         # ------------------------------------------------------
 
         bearish_obs = [
@@ -515,8 +651,11 @@ class SMCSetupValidator:
                 "order_blocks",
                 [],
             )
-            if block.get("direction")
-            == "BEARISH"
+            if (
+                block.get("direction") == "BEARISH"
+                and self._is_recent(block.get("index", 0), latest_index, self.recent_window)
+                and block.get("mitigated", False) is False
+            )
         ]
 
         if bearish_obs:
@@ -524,7 +663,7 @@ class SMCSetupValidator:
             score += 15
 
             evidence.append(
-                "Bearish order block available"
+                "Active bearish order block available"
             )
 
             for block in bearish_obs[-3:]:
@@ -543,7 +682,7 @@ class SMCSetupValidator:
         else:
 
             warnings.append(
-                "No recent bearish order block"
+                "No recent active bearish order block"
             )
 
         # ------------------------------------------------------
@@ -609,6 +748,11 @@ class SMCSetupValidator:
 
             result["grade"] = "NO_SETUP"
 
+        # If setup is invalid, score is 0 regardless
+        if not result["setup_valid"]:
+            result["score"] = 0
+            result["grade"] = "NO_SETUP"
+
         return result
 
     # ==========================================================
@@ -634,6 +778,7 @@ class SMCSetupValidator:
                 "preferred_direction": (
                     "NEUTRAL"
                 ),
+                "setup_valid": False,
             }
 
         bullish = self.evaluate_bullish(
@@ -645,29 +790,39 @@ class SMCSetupValidator:
         )
 
         # ------------------------------------------------------
-        # Preferred direction
+        # Preferred direction (only if setup is valid)
         # ------------------------------------------------------
 
-        if (
-            bullish["score"]
-            > bearish["score"]
-        ):
+        if bullish["setup_valid"] and bearish["setup_valid"]:
 
+            if (
+                bullish["score"]
+                > bearish["score"]
+            ):
+                preferred = "BULLISH"
+            elif (
+                bearish["score"]
+                > bullish["score"]
+            ):
+                preferred = "BEARISH"
+            else:
+                preferred = "NEUTRAL"
+
+        elif bullish["setup_valid"]:
             preferred = "BULLISH"
-
-        elif (
-            bearish["score"]
-            > bullish["score"]
-        ):
-
+        elif bearish["setup_valid"]:
             preferred = "BEARISH"
-
         else:
-
             preferred = "NEUTRAL"
+
+        # Overall setup validity
+        setup_valid = (
+            bullish["setup_valid"] or bearish["setup_valid"]
+        )
 
         return {
             "bullish": bullish,
             "bearish": bearish,
             "preferred_direction": preferred,
+            "setup_valid": setup_valid,
         }
