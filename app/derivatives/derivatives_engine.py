@@ -22,6 +22,8 @@ class DerivativesEngine:
         bearish evidence
         warnings
         context score
+
+    ✅ FIXED: Funding, Long/Short, Liquidations now contribute to score.
     """
 
     def __init__(
@@ -92,6 +94,8 @@ class DerivativesEngine:
         result = {
             "status": "UNKNOWN",
             "change_pct": None,
+            "bullish_score": 0,
+            "bearish_score": 0,
             "interpretation": (
                 "Insufficient OI data"
             ),
@@ -132,6 +136,7 @@ class DerivativesEngine:
                 and price_change > 0
             ):
 
+                result["bullish_score"] = 20
                 result[
                     "interpretation"
                 ] = (
@@ -144,6 +149,7 @@ class DerivativesEngine:
                 and price_change < 0
             ):
 
+                result["bearish_score"] = 20
                 result[
                     "interpretation"
                 ] = (
@@ -175,6 +181,7 @@ class DerivativesEngine:
                 and price_change > 0
             ):
 
+                result["bullish_score"] = 10
                 result[
                     "interpretation"
                 ] = (
@@ -187,6 +194,7 @@ class DerivativesEngine:
                 and price_change < 0
             ):
 
+                result["bearish_score"] = 10
                 result[
                     "interpretation"
                 ] = (
@@ -233,8 +241,10 @@ class DerivativesEngine:
 
             return {
                 "status": "UNKNOWN",
-                "direction": "UNKNOWN",
+                "direction": "NEUTRAL",
                 "risk": "UNKNOWN",
+                "bullish_score": 0,
+                "bearish_score": 0,
                 "interpretation": (
                     "Funding data unavailable"
                 ),
@@ -247,10 +257,12 @@ class DerivativesEngine:
 
             return {
                 "status": "EXTREME",
-                "direction": "BULLISH_BIAS",
+                "direction": "BEARISH",  # Crowded longs → downside risk
                 "risk": "HIGH",
+                "bullish_score": 0,
+                "bearish_score": 10,     # Contrarian warning
                 "interpretation": (
-                    "Crowded long positioning"
+                    "Crowded long positioning - downside risk"
                 ),
             }
 
@@ -258,10 +270,12 @@ class DerivativesEngine:
 
             return {
                 "status": "POSITIVE",
-                "direction": "BULLISH_BIAS",
+                "direction": "BULLISH",
                 "risk": "MODERATE",
+                "bullish_score": 15,
+                "bearish_score": 0,
                 "interpretation": (
-                    "Longs dominate funding"
+                    "Longs dominate funding - bullish bias"
                 ),
             }
 
@@ -272,10 +286,12 @@ class DerivativesEngine:
 
             return {
                 "status": "EXTREME",
-                "direction": "BEARISH_BIAS",
+                "direction": "BULLISH",  # Crowded shorts → upside risk
                 "risk": "HIGH",
+                "bullish_score": 10,     # Contrarian warning
+                "bearish_score": 0,
                 "interpretation": (
-                    "Crowded short positioning"
+                    "Crowded short positioning - upside risk"
                 ),
             }
 
@@ -283,10 +299,12 @@ class DerivativesEngine:
 
             return {
                 "status": "NEGATIVE",
-                "direction": "BEARISH_BIAS",
+                "direction": "BEARISH",
                 "risk": "MODERATE",
+                "bullish_score": 0,
+                "bearish_score": 15,
                 "interpretation": (
-                    "Shorts dominate funding"
+                    "Shorts dominate funding - bearish bias"
                 ),
             }
 
@@ -294,6 +312,8 @@ class DerivativesEngine:
             "status": "NEUTRAL",
             "direction": "NEUTRAL",
             "risk": "LOW",
+            "bullish_score": 0,
+            "bearish_score": 0,
             "interpretation": (
                 "Funding relatively balanced"
             ),
@@ -316,7 +336,9 @@ class DerivativesEngine:
 
             return {
                 "status": "UNKNOWN",
-                "direction": "UNKNOWN",
+                "direction": "NEUTRAL",
+                "bullish_score": 0,
+                "bearish_score": 0,
                 "interpretation": (
                     "Long/short ratio unavailable"
                 ),
@@ -326,9 +348,11 @@ class DerivativesEngine:
 
             return {
                 "status": "LONG_HEAVY",
-                "direction": "BULLISH_BIAS",
+                "direction": "BEARISH",  # Crowded longs → downside risk
+                "bullish_score": 0,
+                "bearish_score": 10,
                 "interpretation": (
-                    "Long positioning is crowded"
+                    "Long positioning is crowded - caution"
                 ),
             }
 
@@ -336,15 +360,19 @@ class DerivativesEngine:
 
             return {
                 "status": "SHORT_HEAVY",
-                "direction": "BEARISH_BIAS",
+                "direction": "BULLISH",  # Crowded shorts → upside risk
+                "bullish_score": 10,
+                "bearish_score": 0,
                 "interpretation": (
-                    "Short positioning is crowded"
+                    "Short positioning is crowded - caution"
                 ),
             }
 
         return {
             "status": "BALANCED",
             "direction": "NEUTRAL",
+            "bullish_score": 0,
+            "bearish_score": 0,
             "interpretation": (
                 "Long/short positioning balanced"
             ),
@@ -358,6 +386,7 @@ class DerivativesEngine:
         self,
         long_liquidations: Any,
         short_liquidations: Any,
+        price_change_pct: Any = None,
     ) -> Dict[str, Any]:
 
         long_liq = self._number(
@@ -368,6 +397,10 @@ class DerivativesEngine:
             short_liquidations
         )
 
+        price_change = self._number(
+            price_change_pct
+        )
+
         if (
             long_liq is None
             or short_liq is None
@@ -376,7 +409,8 @@ class DerivativesEngine:
             return {
                 "status": "UNKNOWN",
                 "dominant": "UNKNOWN",
-                "ratio": None,
+                "bullish_score": 0,
+                "bearish_score": 0,
                 "interpretation": (
                     "Liquidation data unavailable"
                 ),
@@ -392,53 +426,67 @@ class DerivativesEngine:
             return {
                 "status": "NONE",
                 "dominant": "NONE",
-                "ratio": None,
+                "bullish_score": 0,
+                "bearish_score": 0,
                 "interpretation": (
                     "No significant liquidation"
                 ),
             }
 
+        # ------------------------------------------------------
+        # Determine dominant liquidation and score
+        # ------------------------------------------------------
+
         if long_liq > short_liq:
-
             dominant = "LONGS"
-
-            ratio = (
-                long_liq
-                / short_liq
-                if short_liq > 0
-                else None
-            )
-
+            # Long liquidation usually happens during price drops
+            # → bearish context (with price check)
+            if price_change is not None and price_change < 0:
+                # Price fell → long liquidation confirms bearish pressure
+                return {
+                    "status": "ACTIVE",
+                    "dominant": dominant,
+                    "bullish_score": 0,
+                    "bearish_score": 15,
+                    "interpretation": (
+                        "Long liquidations during price drop - bearish"
+                    ),
+                }
+            else:
+                # Long liquidation without clear price drop
+                return {
+                    "status": "ACTIVE",
+                    "dominant": dominant,
+                    "bullish_score": 0,
+                    "bearish_score": 5,
+                    "interpretation": (
+                        "Long liquidations detected - caution"
+                    ),
+                }
         else:
-
             dominant = "SHORTS"
-
-            ratio = (
-                short_liq
-                / long_liq
-                if long_liq > 0
-                else None
-            )
-
-        return {
-            "status": "ACTIVE",
-            "dominant": dominant,
-            "ratio": (
-                round(ratio, 2)
-                if ratio is not None
-                else None
-            ),
-            "long_liquidations": (
-                long_liq
-            ),
-            "short_liquidations": (
-                short_liq
-            ),
-            "interpretation": (
-                f"{dominant} experienced "
-                "more liquidation"
-            ),
-        }
+            # Short liquidation usually happens during price rises
+            # → bullish context (with price check)
+            if price_change is not None and price_change > 0:
+                return {
+                    "status": "ACTIVE",
+                    "dominant": dominant,
+                    "bullish_score": 15,
+                    "bearish_score": 0,
+                    "interpretation": (
+                        "Short liquidations during price rise - bullish"
+                    ),
+                }
+            else:
+                return {
+                    "status": "ACTIVE",
+                    "dominant": dominant,
+                    "bullish_score": 5,
+                    "bearish_score": 0,
+                    "interpretation": (
+                        "Short liquidations detected - caution"
+                    ),
+                }
 
     # ==========================================================
     # Full Context
@@ -483,8 +531,15 @@ class DerivativesEngine:
                 data.get(
                     "short_liquidations"
                 ),
+                data.get(
+                    "price_change_pct"
+                ),
             )
         )
+
+        # ==========================================================
+        # 🔥 NEW: Aggregate scores from all components
+        # ==========================================================
 
         bullish_score = 0
         bearish_score = 0
@@ -496,201 +551,77 @@ class DerivativesEngine:
         # OI
         # ------------------------------------------------------
 
-        if (
-            oi["status"]
-            == "INCREASING"
-        ):
+        bullish_score += oi.get("bullish_score", 0)
+        bearish_score += oi.get("bearish_score", 0)
 
-            if (
-                data.get(
-                    "price_change_pct"
-                ) is not None
-                and float(
-                    data[
-                        "price_change_pct"
-                    ]
-                ) > 0
-            ):
+        if oi.get("bullish_score", 0) > 0:
+            evidence.append("OI supporting bullish")
+        elif oi.get("bearish_score", 0) > 0:
+            evidence.append("OI supporting bearish")
 
-                bullish_score += 20
-
-                evidence.append(
-                    "OI rising with price"
-                )
-
-            elif (
-                data.get(
-                    "price_change_pct"
-                ) is not None
-                and float(
-                    data[
-                        "price_change_pct"
-                    ]
-                ) < 0
-            ):
-
-                bearish_score += 20
-
-                evidence.append(
-                    "OI rising while price falls"
-                )
-
-            else:
-
-                warnings.append(
-                    "OI rising without price confirmation"
-                )
-
-        elif (
-            oi["status"]
-            == "DECREASING"
-        ):
-
-            warnings.append(
-                oi["interpretation"]
-            )
+        if oi["status"] == "INCREASING" and oi.get("bullish_score") == 0 and oi.get("bearish_score") == 0:
+            warnings.append("OI rising without price confirmation")
 
         # ------------------------------------------------------
         # Funding
         # ------------------------------------------------------
 
-        if (
-            funding["direction"]
-            == "BULLISH_BIAS"
-        ):
+        bullish_score += funding.get("bullish_score", 0)
+        bearish_score += funding.get("bearish_score", 0)
 
-            if funding["risk"] == "HIGH":
+        if funding.get("bullish_score", 0) > 0:
+            evidence.append("Positive funding bias")
+        elif funding.get("bearish_score", 0) > 0:
+            evidence.append("Negative funding bias")
 
-                warnings.append(
-                    "Crowded long funding"
-                )
-
-            else:
-
-                evidence.append(
-                    "Moderately positive funding"
-                )
-
-        elif (
-            funding["direction"]
-            == "BEARISH_BIAS"
-        ):
-
-            if funding["risk"] == "HIGH":
-
-                warnings.append(
-                    "Crowded short funding"
-                )
-
-            else:
-
-                evidence.append(
-                    "Moderately negative funding"
-                )
+        if funding["risk"] == "HIGH":
+            warnings.append("Extreme funding - crowded positioning")
 
         # ------------------------------------------------------
         # Long/Short
         # ------------------------------------------------------
 
-        if (
-            long_short["status"]
-            == "LONG_HEAVY"
-        ):
+        bullish_score += long_short.get("bullish_score", 0)
+        bearish_score += long_short.get("bearish_score", 0)
 
-            warnings.append(
-                "Long positioning is crowded"
-            )
-
-        elif (
-            long_short["status"]
-            == "SHORT_HEAVY"
-        ):
-
-            warnings.append(
-                "Short positioning is crowded"
-            )
+        if long_short.get("bullish_score", 0) > 0:
+            evidence.append("Short positioning crowded - potential squeeze")
+        elif long_short.get("bearish_score", 0) > 0:
+            evidence.append("Long positioning crowded - caution")
 
         # ------------------------------------------------------
         # Liquidations
         # ------------------------------------------------------
 
-        if (
-            liquidations["status"]
-            == "ACTIVE"
-        ):
+        bullish_score += liquidations.get("bullish_score", 0)
+        bearish_score += liquidations.get("bearish_score", 0)
 
-            if (
-                liquidations[
-                    "dominant"
-                ]
-                == "LONGS"
-            ):
-
-                evidence.append(
-                    "Long liquidations detected"
-                )
-
-            elif (
-                liquidations[
-                    "dominant"
-                ]
-                == "SHORTS"
-            ):
-
-                evidence.append(
-                    "Short liquidations detected"
-                )
+        if liquidations.get("bullish_score", 0) > 0:
+            evidence.append("Short liquidations detected")
+        elif liquidations.get("bearish_score", 0) > 0:
+            evidence.append("Long liquidations detected")
 
         # ------------------------------------------------------
-        # Score
+        # Final Direction & Score
         # ------------------------------------------------------
 
-        total = (
-            bullish_score
-            + bearish_score
-        )
-
-        if total > 0:
-
-            if (
-                bullish_score
-                > bearish_score
-            ):
-
-                direction = "BULLISH"
-
-            elif (
-                bearish_score
-                > bullish_score
-            ):
-
-                direction = "BEARISH"
-
-            else:
-
-                direction = "NEUTRAL"
-
+        if bullish_score > bearish_score:
+            direction = "BULLISH"
+        elif bearish_score > bullish_score:
+            direction = "BEARISH"
         else:
-
             direction = "NEUTRAL"
 
-        score = max(
-            bullish_score,
-            bearish_score,
-        )
+        score = max(bullish_score, bearish_score)
+
+        # Cap at 100
+        score = min(score, 100)
 
         return {
             "direction": direction,
-            "score": min(
-                score,
-                100,
-            ),
-            "bullish_score": (
-                bullish_score
-            ),
-            "bearish_score": (
-                bearish_score
-            ),
+            "score": round(score, 2),
+            "bullish_score": round(bullish_score, 2),
+            "bearish_score": round(bearish_score, 2),
             "open_interest": oi,
             "funding": funding,
             "long_short": long_short,
