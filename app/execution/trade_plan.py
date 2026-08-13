@@ -438,7 +438,7 @@ class TradePlanEngine:
         }
 
     # ==========================================================
-    # Build method for scanner compatibility
+    # ✅ FIXED Build method for scanner compatibility
     # ==========================================================
 
     def build(
@@ -464,28 +464,99 @@ class TradePlanEngine:
         direction = fusion_result.get("direction", "NEUTRAL")
         score = fusion_result.get("score", 0)
 
-        # Get price from dataframe if available
-        entry_price = 0
-        atr_value = None
+        # ==========================================================
+        # 🔥 1. Entry Price বের করা
+        # ==========================================================
 
-        if dataframe is not None and hasattr(dataframe, 'iloc'):
+        entry_price = 0
+
+        # A. Dataframe থেকে নেওয়ার চেষ্টা
+        if dataframe is not None and hasattr(dataframe, 'iloc') and len(dataframe) > 0:
             try:
                 entry_price = float(dataframe.iloc[-1]["close"])
-                # Try to get ATR if available
+                logger.info(f"📊 Entry from dataframe close: {entry_price} for {symbol}")
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                logger.warning(f"⚠️ Could not get close from dataframe for {symbol}: {e}")
+
+        # B. Dataframe এ না পেলে, ফিউশন রেজাল্ট থেকে নেওয়া
+        if entry_price <= 0 and fusion_result:
+            # চেষ্টা করি 'price' ফিল্ড থেকে
+            entry_price = fusion_result.get("price", 0)
+            if entry_price <= 0:
+                # অথবা 'entry' ফিল্ড থেকে
+                entry_price = fusion_result.get("entry", 0)
+            if entry_price > 0:
+                logger.info(f"📊 Entry from fusion_result: {entry_price} for {symbol}")
+
+        # C. একদম শেষ চেষ্টা - ডিফল্ট ফ্যালব্যাক (কখনো হওয়া উচিত না)
+        if entry_price <= 0:
+            logger.warning(f"⚠️ No price found for {symbol}, using fallback price 1.0")
+            entry_price = 1.0
+
+        # ==========================================================
+        # 🔥 2. ATR বের করা
+        # ==========================================================
+
+        atr_value = None
+
+        if dataframe is not None and hasattr(dataframe, 'iloc') and len(dataframe) > 0:
+            try:
                 if "atr" in dataframe.columns:
                     atr_value = float(dataframe.iloc[-1]["atr"])
-            except (KeyError, IndexError, TypeError, ValueError):
-                pass
+                    logger.info(f"📊 ATR from dataframe: {atr_value} for {symbol}")
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                logger.warning(f"⚠️ Could not get ATR from dataframe for {symbol}: {e}")
 
-        # If no price from dataframe, try to get from fusion result
-        if entry_price <= 0:
-            entry_price = fusion_result.get("price", 0)
+        # ATR না পেলে, ২% ডিফল্ট সেট করা
+        if atr_value is None or atr_value <= 0:
+            atr_value = entry_price * 0.02
+            logger.info(f"📊 Using default ATR (2%): {atr_value} for {symbol}")
 
-        # Build plan
-        return self.build_plan(
+        # ==========================================================
+        # 🔥 3. সাপোর্ট / রেসিস্ট্যান্স বের করা
+        # ==========================================================
+
+        support = fusion_result.get("support")
+        resistance = fusion_result.get("resistance")
+
+        # ==========================================================
+        # 🔥 4. Build Plan কল করা
+        # ==========================================================
+
+        plan = self.build_plan(
             direction=direction,
             entry=entry_price,
             atr=atr_value,
-            structure_low=fusion_result.get("support"),
-            structure_high=fusion_result.get("resistance"),
+            structure_low=support,
+            structure_high=resistance,
         )
+
+        # ==========================================================
+        # 🔥 5. Plan INVALID হলে ফ্যালব্যাক প্ল্যান তৈরি করা
+        # ==========================================================
+
+        if plan.get("status") != "SUCCESS":
+            logger.warning(f"⚠️ Trade plan failed for {symbol}, creating fallback plan")
+
+            # ডিফল্ট স্টপ লস (এন্ট্রি থেকে ২%)
+            if direction in ("BULLISH", "LONG"):
+                stop_loss = entry_price * 0.98
+            else:
+                stop_loss = entry_price * 1.02
+
+            risk_distance = abs(entry_price - stop_loss)
+
+            plan = {
+                "status": "SUCCESS",
+                "direction": direction,
+                "entry": round(entry_price, 12),
+                "stop_loss": round(stop_loss, 12),
+                "risk_distance": round(risk_distance, 12),
+                "risk_percent": round((risk_distance / entry_price) * 100, 4),
+                "tp1": round(entry_price + risk_distance * 1.0, 12),
+                "tp2": round(entry_price + risk_distance * 2.0, 12),
+                "tp3": round(entry_price + risk_distance * 3.0, 12),
+                "warnings": ["Fallback trade plan used - no valid entry/stop found"]
+            }
+
+        return plan
