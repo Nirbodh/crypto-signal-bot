@@ -1,6 +1,7 @@
 import inspect
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 
@@ -131,6 +132,9 @@ class ScannerEngine:
         self.trade_plan_engine = trade_plan_engine
         self.risk_engine = risk_engine
         self.telegram_bot = telegram_bot
+
+        # 🔥 NEW: Breakout Memory for retest detection
+        self.breakout_memory = {}  # symbol → {"level": float, "time": str, "direction": str, "level_type": str}
 
         logger.info(
             "ScannerEngine initialized | "
@@ -945,6 +949,98 @@ class ScannerEngine:
         return result
 
     # ==========================================================
+    # 🔥 NEW: Breakout Memory Management
+    # ==========================================================
+
+    def _update_breakout_memory(
+        self,
+        symbol: str,
+        smc_result: Dict[str, Any],
+        df: Any,
+    ) -> None:
+        """
+        Store breakout levels when SMC detects BOS/CHoCH with displacement.
+        """
+        if not smc_result:
+            return
+
+        last_structure = smc_result.get("last_structure")
+        if last_structure not in {"BULLISH", "BEARISH"}:
+            return
+
+        # Check if there is a recent BOS/CHoCH event with displacement
+        recent_events = smc_result.get("recent", {}).get("events", [])
+        has_valid_breakout = False
+        level = None
+
+        for event in recent_events:
+            if event.get("type") in {"BOS", "CHoCH"} and event.get("direction") == last_structure:
+                # Check if this event has displacement (strength)
+                # We'll use a simple threshold: if there's any displacement event nearby
+                displacement_events = [
+                    e for e in recent_events
+                    if e.get("type") == "DISPLACEMENT" and e.get("direction") == last_structure
+                ]
+                if displacement_events:
+                    has_valid_breakout = True
+                    # Use the swing level from the event or current price
+                    level = event.get("level")
+                    break
+
+        if not has_valid_breakout or level is None:
+            # If no explicit level, use current close as reference
+            try:
+                level = float(df.iloc[-1]["close"])
+            except:
+                return
+
+        # Store in memory
+        self.breakout_memory[symbol] = {
+            "level": level,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            "direction": last_structure,
+            "level_type": "swing_high" if last_structure == "BULLISH" else "swing_low"
+        }
+        logger.info(
+            "📌 Breakout stored for %s | direction=%s | level=%.6f",
+            symbol,
+            last_structure,
+            level
+        )
+
+    def _check_breakout_retest(
+        self,
+        symbol: str,
+        current_price: float,
+        tolerance_pct: float = 2.0,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Check if current price is retesting a stored breakout level.
+        Returns the memory entry if retesting, else None.
+        """
+        if symbol not in self.breakout_memory:
+            return None
+
+        memory = self.breakout_memory[symbol]
+        breakout_level = memory.get("level")
+        if breakout_level is None or breakout_level <= 0:
+            return None
+
+        # Check if price is within tolerance of the breakout level
+        diff_pct = abs(current_price - breakout_level) / breakout_level * 100
+        if diff_pct <= tolerance_pct:
+            logger.info(
+                "🔄 Retest detected for %s | breakout=%.6f | current=%.6f | diff=%.2f%%",
+                symbol,
+                breakout_level,
+                current_price,
+                diff_pct
+            )
+            return memory
+
+        return None
+
+    # ==========================================================
     # Scan One Symbol
     # ==========================================================
 
@@ -1208,6 +1304,13 @@ class ScannerEngine:
 
         # Update analysis_context with the scored SMC for later use
         analysis_context["smc_scored"] = smc_scored
+
+        # ======================================================
+        # 🔥 NEW: Update Breakout Memory
+        # ======================================================
+
+        if self._has_real_analysis(smc_result):
+            self._update_breakout_memory(symbol, smc_result, df)
 
         # ======================================================
         # 4. Multi-Timeframe
