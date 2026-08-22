@@ -27,6 +27,7 @@ class SMCSetupValidator:
         - Structural gate added (Sweep OR BOS/CHoCH required).
         - ✅ NEW: Zone Re-entry (Active FVG/OB + Discount/Premium).
         - ✅ NEW: Rejection candle check for pullback confirmation.
+        - ✅ NEW: Breakout Retest (stored breakout level + retest + rejection candle).
         - Setup validity flag added.
     """
 
@@ -143,6 +144,7 @@ class SMCSetupValidator:
     def evaluate_bullish(
         self,
         smc_result: Dict[str, Any],
+        **kwargs,  # Accept additional context
     ) -> Dict[str, Any]:
 
         result = self._empty_setup(
@@ -171,8 +173,16 @@ class SMCSetupValidator:
         if not latest_index and data is not None and hasattr(data, 'index'):
             latest_index = data.index[-1] if len(data) > 0 else 0
 
+        # 🔥 Extract breakout retest info from kwargs if provided
+        breakout_retest = kwargs.get("breakout_retest")
+        has_breakout_retest = False
+        if breakout_retest and isinstance(breakout_retest, dict):
+            # Check if the retest direction matches the target direction
+            if breakout_retest.get("direction") == "BULLISH":
+                has_breakout_retest = True
+
         # ==========================================================
-        # 🔥 STRUCTURAL GATE + ZONE RE-ENTRY + REJECTION CANDLE
+        # 🔥 STRUCTURAL GATE + ZONE RE-ENTRY + BREAKOUT RETEST
         # ==========================================================
 
         has_bullish_sweep = False
@@ -238,9 +248,15 @@ class SMCSetupValidator:
             and bullish_rejection
         )
 
-        if not (structural_ok or zone_reentry_ok):
+        # Option 3: Breakout Retest (stored breakout level + retest + rejection candle)
+        breakout_retest_ok = (
+            has_breakout_retest
+            and bullish_rejection
+        )
+
+        if not (structural_ok or zone_reentry_ok or breakout_retest_ok):
             result["warnings"].append(
-                "No recent structural evidence (sweep/BOS/CHoCH) or valid pullback setup"
+                "No recent structural evidence (sweep/BOS/CHoCH) or valid pullback/retest setup"
             )
             result["setup_valid"] = False
             return result
@@ -254,6 +270,11 @@ class SMCSetupValidator:
                 evidence.append("Active FVG in discount zone")
             if has_active_bullish_ob:
                 evidence.append("Active Order Block in discount zone")
+            if bullish_rejection:
+                evidence.append("Bullish rejection candle confirmed")
+
+        if breakout_retest_ok:
+            evidence.append("Bullish breakout retest detected")
             if bullish_rejection:
                 evidence.append("Bullish rejection candle confirmed")
 
@@ -503,6 +524,7 @@ class SMCSetupValidator:
     def evaluate_bearish(
         self,
         smc_result: Dict[str, Any],
+        **kwargs,
     ) -> Dict[str, Any]:
 
         result = self._empty_setup(
@@ -531,8 +553,15 @@ class SMCSetupValidator:
         if not latest_index and data is not None and hasattr(data, 'index'):
             latest_index = data.index[-1] if len(data) > 0 else 0
 
+        # 🔥 Extract breakout retest info from kwargs
+        breakout_retest = kwargs.get("breakout_retest")
+        has_breakout_retest = False
+        if breakout_retest and isinstance(breakout_retest, dict):
+            if breakout_retest.get("direction") == "BEARISH":
+                has_breakout_retest = True
+
         # ==========================================================
-        # 🔥 STRUCTURAL GATE + ZONE RE-ENTRY + REJECTION CANDLE (Bearish)
+        # 🔥 STRUCTURAL GATE + ZONE RE-ENTRY + BREAKOUT RETEST (Bearish)
         # ==========================================================
 
         has_bearish_sweep = False
@@ -587,7 +616,7 @@ class SMCSetupValidator:
         bearish_rejection = self._is_bearish_rejection_candle(data)
 
         # Gate condition:
-        # Option 1: Fresh structural evidence (sweep or BOS/CHoCH)
+        # Option 1: Fresh structural evidence
         structural_ok = has_bearish_sweep or has_bearish_structure
 
         # Option 2: Zone Re-entry (Active FVG/OB + Premium) + Rejection Candle
@@ -597,22 +626,32 @@ class SMCSetupValidator:
             and bearish_rejection
         )
 
-        if not (structural_ok or zone_reentry_ok):
+        # Option 3: Breakout Retest
+        breakout_retest_ok = (
+            has_breakout_retest
+            and bearish_rejection
+        )
+
+        if not (structural_ok or zone_reentry_ok or breakout_retest_ok):
             result["warnings"].append(
-                "No recent structural evidence (sweep/BOS/CHoCH) or valid pullback setup"
+                "No recent structural evidence (sweep/BOS/CHoCH) or valid pullback/retest setup"
             )
             result["setup_valid"] = False
             return result
 
         result["setup_valid"] = True
 
-        # If zone re-entry detected, add evidence
         if zone_reentry_ok:
             evidence.append("Bearish pullback / zone re-entry detected")
             if has_active_bearish_fvg:
                 evidence.append("Active FVG in premium zone")
             if has_active_bearish_ob:
                 evidence.append("Active Order Block in premium zone")
+            if bearish_rejection:
+                evidence.append("Bearish rejection candle confirmed")
+
+        if breakout_retest_ok:
+            evidence.append("Bearish breakout retest detected")
             if bearish_rejection:
                 evidence.append("Bearish rejection candle confirmed")
 
@@ -865,6 +904,7 @@ class SMCSetupValidator:
         smc_result: Optional[
             Dict[str, Any]
         ],
+        **kwargs,  # Accept additional context like breakout_retest
     ) -> Dict[str, Any]:
 
         if not smc_result:
@@ -882,12 +922,15 @@ class SMCSetupValidator:
                 "setup_valid": False,
             }
 
+        # Pass kwargs to individual evaluators
         bullish = self.evaluate_bullish(
-            smc_result
+            smc_result,
+            **kwargs
         )
 
         bearish = self.evaluate_bearish(
-            smc_result
+            smc_result,
+            **kwargs
         )
 
         # ------------------------------------------------------
