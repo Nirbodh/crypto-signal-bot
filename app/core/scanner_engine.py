@@ -928,6 +928,10 @@ class ScannerEngine:
         context["fusion_result"] = fusion_result
         context["symbol"] = symbol
 
+        # 🔥 Pass breakout retest info if available
+        if "breakout_retest" in analysis_context:
+            context["breakout_retest"] = analysis_context["breakout_retest"]
+
         result = self._call_engine(
             engine=self.setup_validator,
             preferred_methods=[
@@ -1225,6 +1229,13 @@ class ScannerEngine:
                     "timeframe_data": timeframe_data,
                     "analysis_context": analysis_context,
                 }
+
+                # 🔥 Add breakout retest info to validator context
+                current_price = float(df.iloc[-1]["close"])
+                breakout_retest = self._check_breakout_retest(symbol, current_price)
+                if breakout_retest:
+                    validator_context["breakout_retest"] = breakout_retest
+                    analysis_context["breakout_retest"] = breakout_retest
 
                 validator_output = self._call_engine(
                     engine=self.setup_validator,
