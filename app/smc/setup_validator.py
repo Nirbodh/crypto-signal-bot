@@ -25,6 +25,8 @@ class SMCSetupValidator:
         - recent_window now actually used.
         - Mitigated FVG/OB no longer score.
         - Structural gate added (Sweep OR BOS/CHoCH required).
+        - ✅ NEW: Zone Re-entry (Active FVG/OB + Discount/Premium).
+        - ✅ NEW: Rejection candle check for pullback confirmation.
         - Setup validity flag added.
     """
 
@@ -62,6 +64,78 @@ class SMCSetupValidator:
         """Check if event is within recent window."""
         return (latest_index - event_index) <= window
 
+    @staticmethod
+    def _is_bullish_rejection_candle(
+        data,
+    ) -> bool:
+        """
+        Check if the latest candle is a bullish rejection (pinbar/hammer).
+        Lower wick > body, close > open, and low < previous low but close > previous close.
+        """
+        if data is None or len(data) < 2:
+            return False
+
+        try:
+            last = data.iloc[-1]
+            prev = data.iloc[-2]
+
+            open_price = float(last["open"])
+            close_price = float(last["close"])
+            high = float(last["high"])
+            low = float(last["low"])
+            prev_low = float(prev["low"])
+            prev_close = float(prev["close"])
+
+            body = abs(close_price - open_price)
+            lower_wick = min(open_price, close_price) - low
+            upper_wick = high - max(open_price, close_price)
+
+            # Bullish candle with lower wick > body (pinbar/hammer)
+            if close_price > open_price and lower_wick > body * 1.5:
+                # Also check if it made a lower low but closed higher than previous close
+                if low < prev_low and close_price > prev_close:
+                    return True
+        except:
+            pass
+
+        return False
+
+    @staticmethod
+    def _is_bearish_rejection_candle(
+        data,
+    ) -> bool:
+        """
+        Check if the latest candle is a bearish rejection (shooting star/pinbar).
+        Upper wick > body, close < open, and high > previous high but close < previous close.
+        """
+        if data is None or len(data) < 2:
+            return False
+
+        try:
+            last = data.iloc[-1]
+            prev = data.iloc[-2]
+
+            open_price = float(last["open"])
+            close_price = float(last["close"])
+            high = float(last["high"])
+            low = float(last["low"])
+            prev_high = float(prev["high"])
+            prev_close = float(prev["close"])
+
+            body = abs(close_price - open_price)
+            lower_wick = min(open_price, close_price) - low
+            upper_wick = high - max(open_price, close_price)
+
+            # Bearish candle with upper wick > body (shooting star)
+            if close_price < open_price and upper_wick > body * 1.5:
+                # Also check if it made a higher high but closed lower than previous close
+                if high > prev_high and close_price < prev_close:
+                    return True
+        except:
+            pass
+
+        return False
+
     # ==========================================================
     # Bullish setup
     # ==========================================================
@@ -93,14 +167,12 @@ class SMCSetupValidator:
 
         # Get latest index for recency check
         latest_index = smc_result.get("current_index", 0)
-        if not latest_index:
-            # Fallback: try to get from data
-            data = smc_result.get("data")
-            if data is not None and hasattr(data, 'index'):
-                latest_index = data.index[-1] if len(data) > 0 else 0
+        data = smc_result.get("data")
+        if not latest_index and data is not None and hasattr(data, 'index'):
+            latest_index = data.index[-1] if len(data) > 0 else 0
 
         # ==========================================================
-        # 🔥 STRUCTURAL GATE: Sweep OR BOS/CHoCH required
+        # 🔥 STRUCTURAL GATE + ZONE RE-ENTRY + REJECTION CANDLE
         # ==========================================================
 
         has_bullish_sweep = False
@@ -130,15 +202,60 @@ class SMCSetupValidator:
             ):
                 has_bullish_structure = True
 
-        # Gate: At least one structural event required
-        if not (has_bullish_sweep or has_bullish_structure):
+        # Check for active FVG/OB (not mitigated)
+        bullish_fvgs = [
+            gap
+            for gap in recent.get("fvg", [])
+            if gap.get("direction") == "BULLISH"
+            and self._is_recent(gap.get("index", 0), latest_index, self.recent_window)
+            and gap.get("mitigated", False) is False
+        ]
+        has_active_bullish_fvg = len(bullish_fvgs) > 0
+
+        bullish_obs = [
+            block
+            for block in recent.get("order_blocks", [])
+            if block.get("direction") == "BULLISH"
+            and self._is_recent(block.get("index", 0), latest_index, self.recent_window)
+            and block.get("mitigated", False) is False
+        ]
+        has_active_bullish_ob = len(bullish_obs) > 0
+
+        zone_state = premium_discount.get("state")
+        in_discount = (zone_state == "DISCOUNT")
+
+        # Check rejection candle
+        bullish_rejection = self._is_bullish_rejection_candle(data)
+
+        # Gate condition:
+        # Option 1: Fresh structural evidence (sweep or BOS/CHoCH)
+        structural_ok = has_bullish_sweep or has_bullish_structure
+
+        # Option 2: Zone Re-entry (Active FVG/OB + Discount) + Rejection Candle
+        zone_reentry_ok = (
+            (has_active_bullish_fvg or has_active_bullish_ob)
+            and in_discount
+            and bullish_rejection
+        )
+
+        if not (structural_ok or zone_reentry_ok):
             result["warnings"].append(
-                "No recent bullish structural evidence (sweep or BOS/CHoCH)"
+                "No recent structural evidence (sweep/BOS/CHoCH) or valid pullback setup"
             )
             result["setup_valid"] = False
             return result
 
         result["setup_valid"] = True
+
+        # If zone re-entry detected, add evidence
+        if zone_reentry_ok:
+            evidence.append("Bullish pullback / zone re-entry detected")
+            if has_active_bullish_fvg:
+                evidence.append("Active FVG in discount zone")
+            if has_active_bullish_ob:
+                evidence.append("Active Order Block in discount zone")
+            if bullish_rejection:
+                evidence.append("Bullish rejection candle confirmed")
 
         # ------------------------------------------------------
         # 1. Bullish liquidity sweep
@@ -254,19 +371,6 @@ class SMCSetupValidator:
         # 4. Bullish FVG (only if not mitigated)
         # ------------------------------------------------------
 
-        bullish_fvgs = [
-            gap
-            for gap in recent.get(
-                "fvg",
-                [],
-            )
-            if (
-                gap.get("direction") == "BULLISH"
-                and self._is_recent(gap.get("index", 0), latest_index, self.recent_window)
-                and gap.get("mitigated", False) is False
-            )
-        ]
-
         if bullish_fvgs:
 
             score += 15
@@ -299,19 +403,6 @@ class SMCSetupValidator:
         # 5. Bullish Order Block (only if not mitigated)
         # ------------------------------------------------------
 
-        bullish_obs = [
-            block
-            for block in recent.get(
-                "order_blocks",
-                [],
-            )
-            if (
-                block.get("direction") == "BULLISH"
-                and self._is_recent(block.get("index", 0), latest_index, self.recent_window)
-                and block.get("mitigated", False) is False
-            )
-        ]
-
         if bullish_obs:
 
             score += 15
@@ -343,11 +434,7 @@ class SMCSetupValidator:
         # 6. Discount zone
         # ------------------------------------------------------
 
-        zone_state = premium_discount.get(
-            "state"
-        )
-
-        if zone_state == "DISCOUNT":
+        if in_discount:
 
             score += 10
 
@@ -440,13 +527,12 @@ class SMCSetupValidator:
 
         # Get latest index for recency check
         latest_index = smc_result.get("current_index", 0)
-        if not latest_index:
-            data = smc_result.get("data")
-            if data is not None and hasattr(data, 'index'):
-                latest_index = data.index[-1] if len(data) > 0 else 0
+        data = smc_result.get("data")
+        if not latest_index and data is not None and hasattr(data, 'index'):
+            latest_index = data.index[-1] if len(data) > 0 else 0
 
         # ==========================================================
-        # 🔥 STRUCTURAL GATE: Sweep OR BOS/CHoCH required
+        # 🔥 STRUCTURAL GATE + ZONE RE-ENTRY + REJECTION CANDLE (Bearish)
         # ==========================================================
 
         has_bearish_sweep = False
@@ -475,15 +561,60 @@ class SMCSetupValidator:
             ):
                 has_bearish_structure = True
 
-        # Gate: At least one structural event required
-        if not (has_bearish_sweep or has_bearish_structure):
+        # Check for active FVG/OB (not mitigated)
+        bearish_fvgs = [
+            gap
+            for gap in recent.get("fvg", [])
+            if gap.get("direction") == "BEARISH"
+            and self._is_recent(gap.get("index", 0), latest_index, self.recent_window)
+            and gap.get("mitigated", False) is False
+        ]
+        has_active_bearish_fvg = len(bearish_fvgs) > 0
+
+        bearish_obs = [
+            block
+            for block in recent.get("order_blocks", [])
+            if block.get("direction") == "BEARISH"
+            and self._is_recent(block.get("index", 0), latest_index, self.recent_window)
+            and block.get("mitigated", False) is False
+        ]
+        has_active_bearish_ob = len(bearish_obs) > 0
+
+        zone_state = premium_discount.get("state")
+        in_premium = (zone_state == "PREMIUM")
+
+        # Check rejection candle
+        bearish_rejection = self._is_bearish_rejection_candle(data)
+
+        # Gate condition:
+        # Option 1: Fresh structural evidence (sweep or BOS/CHoCH)
+        structural_ok = has_bearish_sweep or has_bearish_structure
+
+        # Option 2: Zone Re-entry (Active FVG/OB + Premium) + Rejection Candle
+        zone_reentry_ok = (
+            (has_active_bearish_fvg or has_active_bearish_ob)
+            and in_premium
+            and bearish_rejection
+        )
+
+        if not (structural_ok or zone_reentry_ok):
             result["warnings"].append(
-                "No recent bearish structural evidence (sweep or BOS/CHoCH)"
+                "No recent structural evidence (sweep/BOS/CHoCH) or valid pullback setup"
             )
             result["setup_valid"] = False
             return result
 
         result["setup_valid"] = True
+
+        # If zone re-entry detected, add evidence
+        if zone_reentry_ok:
+            evidence.append("Bearish pullback / zone re-entry detected")
+            if has_active_bearish_fvg:
+                evidence.append("Active FVG in premium zone")
+            if has_active_bearish_ob:
+                evidence.append("Active Order Block in premium zone")
+            if bearish_rejection:
+                evidence.append("Bearish rejection candle confirmed")
 
         # ------------------------------------------------------
         # 1. Bearish liquidity sweep
@@ -600,19 +731,6 @@ class SMCSetupValidator:
         # 4. Bearish FVG (only if not mitigated)
         # ------------------------------------------------------
 
-        bearish_fvgs = [
-            gap
-            for gap in recent.get(
-                "fvg",
-                [],
-            )
-            if (
-                gap.get("direction") == "BEARISH"
-                and self._is_recent(gap.get("index", 0), latest_index, self.recent_window)
-                and gap.get("mitigated", False) is False
-            )
-        ]
-
         if bearish_fvgs:
 
             score += 15
@@ -645,19 +763,6 @@ class SMCSetupValidator:
         # 5. Bearish Order Block (only if not mitigated)
         # ------------------------------------------------------
 
-        bearish_obs = [
-            block
-            for block in recent.get(
-                "order_blocks",
-                [],
-            )
-            if (
-                block.get("direction") == "BEARISH"
-                and self._is_recent(block.get("index", 0), latest_index, self.recent_window)
-                and block.get("mitigated", False) is False
-            )
-        ]
-
         if bearish_obs:
 
             score += 15
@@ -689,11 +794,7 @@ class SMCSetupValidator:
         # 6. Premium zone
         # ------------------------------------------------------
 
-        zone_state = premium_discount.get(
-            "state"
-        )
-
-        if zone_state == "PREMIUM":
+        if in_premium:
 
             score += 10
 
